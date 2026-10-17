@@ -1,85 +1,90 @@
 # X176 Freedom
 
-**JamesDSP Liveprog 脚本** — 多级并行音频处理链
+**JamesDSP Liveprog / EEL2 audio-processing script**  
+Public snapshot: **X176 Freedom 1.8.41 — Warm Body v1**
 
-默认调音 **Warm Body**：去纸片感、保留体量、中性耐听。
+X176 Freedom is the flexible parent script in the X176 line. Its default configuration is a restrained four-node “Warm Body” tuning; optional spatial and sound-editing primitives remain in the source but are not enabled by the default preset.
 
----
+> **Release scope:** this repository publishes the existing 1.8.41 source snapshot and supporting public documentation. The publication and documentation corrections do not imply that every optional processing path has been tested in every host.
 
-## 功能概览
+## Features
 
-- **4 节点并行拓扑**（可独立配置 Mid / Side 权重）
-- 参数均衡（SVF + Biquad）
-- 动态塑形 / 谐波生成（odd / even / soft clip / wavefold 等）
-- M/S 立体声场处理
-- 可选空间与声音编辑总线（默认关闭，零额外开销）
-- 条件旁通优化，未启用模块几乎不占用算力
+- Node-based processing with a configured maximum of 10 nodes (MAX_NODES = 10); the default Warm Body preset uses four.
+- Parametric EQ using SVF and biquad paths.
+- Dynamic shaping, harmonic generation and nonlinear waveshaping.
+- Mid/Side (M/S) weighting and processing.
+- Optional spatial and sound-editing buses built from primitives such as TAP, FDN, AIR and related modules; buses are disabled by default.
+- Conditional bypass paths intended to avoid unnecessary work when modules are inactive.
 
-默认 Warm Body 配置下估算约 **1.25k 单位/样本**，适合日常长时间使用。
+## Compatibility
 
----
+| Host | Status in this repository |
+| --- | --- |
+| JamesDSP Liveprog on Android | Target host; validate against the version in use |
+| RootlessJamesDSP | Target host; validate independently |
+| JDSP4Linux / JamesDSP for Linux | Target host; validate independently |
 
-## 兼容性
+The table identifies intended targets, not a claim that this repository contains repeatable integration-test results for every host/version combination.
 
-| 平台 | 状态 |
-|------|------|
-| JamesDSP（Android，含 RootlessJamesDSP） | 支持 |
-| JDSP4Linux / JamesDSP for Linux | 支持 |
+## Install
 
----
+1. Download [X176_Freedom.eel](X176_Freedom.eel).
+2. In a compatible JamesDSP host, open **Liveprog** and import the script.
+3. Enable it and first test with the default configuration at a moderate listening level.
+4. Change one parameter group at a time, keeping a copy of the unmodified script so you can revert.
 
-## 安装
+## Default Warm Body tuning
 
-1. 下载 [`X176_Freedom.eel`](X176_Freedom.eel)
-2. 打开 JamesDSP → **Liveprog** → 导入脚本
-3. 启用并按需微调
+The default preset is intended to gently reduce a perceived bright/thin or “papery” balance while retaining body. Its documented settings include:
 
-### 推荐微调旋钮
+- 75 Hz bell: +1.8 dB.
+- Around 250 Hz: low-shelf lift of approximately +1.0 dB.
+- 3.3 kHz bell: −2.0 dB.
+- 6.3 kHz bell: −1.2 dB.
+- Selected low-frequency nodes work on Mid only; the two upper corrective nodes use increased Side weighting.
+- Output gain is reduced to leave some headroom.
+- Spatial buses are disabled by default.
 
-脚本内提供四个预增益旋钮（写在节点配置区）：
+These are design intentions and parameter descriptions, not a guarantee that every listener or source will prefer the tuning. Perceived sound quality should be judged by listening tests with familiar material.
 
-| 旋钮 | 作用 |
-|------|------|
-| `PRE_BASS` | 低频体量 |
-| `PRE_BODY` | 低中频厚度 |
-| `PRE_MID` | 中频 |
-| `PRE_TOP` | 高频空气感 |
+## Main tuning controls
 
-默认值 `1.0` = 原调音强度；设为 `0` 可关闭对应段。
+The source provides four pre-gain controls in the node configuration area:
 
----
+| Control | Intended role |
+| --- | --- |
+| PRE_BASS | Low-frequency amount |
+| PRE_BODY | Low-mid body |
+| PRE_MID | Midrange |
+| PRE_TOP | High-frequency amount |
 
-## 默认调音说明（Warm Body v1）
+A value of 1.0 means the configured default amount; 0 disables that contribution. Use the source comments to locate the configuration section and keep node-setting calls before rebuild_active_list().
 
-目标：**把偏亮、偏薄、有纸片感的音频拉回自然**。
+## Important configuration-order rules
 
-- **去纸**：3.3 kHz 钟形 −2.0 dB + 6.3 kHz 钟形 −1.2 dB
-- **体量**：75 Hz 钟形 +1.8 dB + 250 Hz 低架 +1.0 dB
-- **M/S**：低频节点只处理 Mid；去纸节点 Side 权重略高，侧声道中高多收一点
-- **空间总线默认关闭**（避免反射抹糊瞬态，也节省大量算力）
+Some examples near the end of the source are illustrative configuration snippets. Do not enable every example in place without checking its preconditions.
 
-空间相关 primitive（TAP / FDN / AIR 等）完整保留，需要时在脚本注释区有备份与示例。
+- **Node sends:** set_p_send(...) calls must be placed in the node configuration section, after the relevant node_begin() setup and before rebuild_active_list(). The active-node list and send-activity flag are built at initialization; configuring sends later can leave them out of date.
+- **Three-bus example:** the source default is BUS_MAX = 2, so only bus IDs 0 and 1 are available. The example labelled “three-band processing” uses bus ID 2; that example requires BUS_MAX >= 3 before the script is loaded. With the default value, the helper clamps bus ID 2 to bus 1, where it can overwrite that bus's configuration. Increasing the bus count also changes memory and processing requirements; re-test before use.
+- **Finalize last:** spatial-bus configuration calls must be placed before s_finalize(), which finalizes configured bus state.
 
----
+The public script's inline warnings are the source of truth for exact call order and parameter constraints.
 
-## 文件说明
+## Performance estimate
 
-```
-X176_Freedom.eel   主脚本（导入 Liveprog 使用）
-LICENSE            MIT 许可证
-README.md          本文件
-```
+The source documents approximately **1.25k weighted operation units per sample** for the default Warm Body configuration. This is a static, weighted estimate intended for relative comparison—not a measured CPU percentage, wall-clock benchmark, or promise of performance across devices and hosts. Actual load depends on host, sample rate, build/runtime and the enabled processing path.
 
----
+## Repository contents
 
-## 版本
+- X176_Freedom.eel — the Liveprog script.
+- README.md — overview, install notes and important configuration constraints.
+- CHANGELOG.md — public release and documentation-change record.
+- TESTING.md — current validation scope and recommended checks.
+- CONTRIBUTING.md — maintenance and review checklist.
+- LICENSE — MIT License.
 
-当前公开版本基于 **X176 Freedom 1.8.41 Warm Body Maintain**。
+The internal maintainer scripts mentioned in the source history are not included here. Therefore, their previous results should not be treated as automatically reproducible from this repository alone.
 
-内部维护工具链（转译器、静态检查、性能热点分析等）不包含在本仓库中。
+## License
 
----
-
-## 许可证
-
-MIT License — 可自由使用、修改与分发。
+[MIT License](LICENSE).
