@@ -16,7 +16,7 @@ These caveats also appear in the maintained source snapshot from before publicat
 - The three-band example uses bus IDs 0, 1 and 2 while the default BUS_MAX is 2 (valid IDs: 0 and 1). Use that example only after increasing BUS_MAX to at least 3 and revalidating memory and performance.
 - set_p_send() must run before rebuild_active_list() and the send-activity scan. The send example near the end of the source must be moved to the earlier node configuration area before it is enabled.
 
-## 2026-10-18 — Public documentation and example-safety review
+## 2026-10-17 — Public documentation and example-safety review
 
 - Clarified target-host status, default node count, performance-estimate scope and configuration ordering in the README.
 - Added a testing checklist and contributor checklist.
