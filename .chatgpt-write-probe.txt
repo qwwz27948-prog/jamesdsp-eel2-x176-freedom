@@ -1,0 +1,2 @@
+Temporary ChatGPT GitHub connector write-permission probe.
+This file is intended to be deleted immediately after verification.
