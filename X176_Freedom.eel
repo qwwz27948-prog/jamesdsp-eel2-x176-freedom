@@ -3,14 +3,4192 @@ author: Coolk & contributors
 version: X176 Freedom 1.8.41 (Warm Body v1)
 
 // ==========================================================================
-// 注意：当前仓库中的此文件为占位符。
-// 完整脚本约 200KB，请从本机 artifacts 或维护者提供的完整版替换上传。
-// 完整版包含：4 节点并行引擎 + Warm Body 默认调音 + 可选空间总线。
+// X176 Freedom — JamesDSP Liveprog 脚本
+//
+// 多级并行处理链：参数均衡 + 动态塑形 + 谐波生成 + M/S 处理
+// 可选空间/声音编辑总线（默认关闭，零额外开销）
+//
+// 默认调音 Warm Body：
+//   · 去纸片感（3.3 kHz / 6.3 kHz 温和衰减）
+//   · 保留体量与空气感
+//   · 中性、耐听，不追一耳鲜
+//   · 默认不开空间总线（算力约 1.25k 单位/样本）
+//
+// 兼容：
+//   · JamesDSP（Android，含 RootlessJamesDSP）
+//   · JDSP4Linux / JamesDSP for Linux
+//
+// 安装：
+//   1. 下载本文件（X176_Freedom.eel）
+//   2. 打开 JamesDSP → Liveprog → 导入脚本
+//   3. 启用并按需微调 PRE_* 旋钮
+//
+// 许可证：MIT License
+// 仓库：https://github.com/qwwz27948-prog/DSP-EEL2-EQ-
 // ==========================================================================
 
-@init
-// placeholder — replace with full 1.8.41 Warm Body script before use
+// [Warm Body v1 调音] 中高过胜 / 纸片感 的修正 · 体量 · 久听不累 · 纯节点（不开空间总线）
+//
+// 立场：中性、耐听。不追"一耳鲜"，不靠新奇的空间效果，目标是把"偏亮偏薄"的
+//       音频拉回自然——结果导向，手段只用最便宜的：EQ + 偶次谐波 + M/S 权重。
+//
+// 纸片感 = 中高（2~7kHz）能量相对过多 + 低中频（100~300Hz）体量不足。所以做三件事：
+//   A 去纸（减法为主）：3.3kHz 钟形 −2.0dB（主刀，Q0.8，宽而缓）+ 6.3kHz 钟形 −1.2dB
+//     （去毛刺）。10kHz 以上基本不动，保留空气感，避免发闷。
+//   B 体量（加法克制）：75Hz 钟形 +1.8dB（Q1.1，窄于低架，避免把 40Hz 以下的次声段
+//     一并抬起来浪费余量）+ 250Hz 低架 +1.0dB（补低中频，"厚"从这里来）。
+//     不在 300~450Hz 加任何东西——那是箱声区，抬了就糊。
+//   C 谐波下潜：75Hz 供料 + 纯偶次（只产 2 次谐波，H3 实测 < −80dB）。小单元放不出
+//     40~60Hz 时，2 次谐波让人"听见"低音，不靠抬音量。强度随电平平方增长：
+//     −6dBFS 的 75Hz 约 H2 −23dB，−24dBFS 时约 −38dB（轻声不加料，响时才厚）。
+//
+// M/S 设计（零额外算力，全靠节点权重）：
+//   * 低频两个节点只做 mid（side 权重 0）：低音居中成团、单声道兼容，且走单通道引擎，
+//     每节点比双通道省约 40% 算力（实测 216 对 354 单位）。
+//   * 两个去纸节点 side 权重 1.25：侧声道的中高多收 ~0.7dB——宽的"沙沙感"是纸片感的
+//     帮凶，中置（人声）不受影响。
+//
+// 为什么没有空间模块：上一版默认（Substance）带两条房间总线，估算占全部算力的 82%，
+//   且早期反射 / 扩散叠在主路上会抹糊瞬态——与"中性、不糊"相悖。空间功能仍完整保留，
+//   见 Section 3.6 的备份与示例；要开请先看每个 primitive 的成本说明。
+//
+// 调节旋钮（乘在 dB 上，1.0 = 默认，0 = 关该段，可超过 1）：PRE_BASS / PRE_BODY /
+//   PRE_MID / PRE_TOP，写在 Section 3 节点区最前面。
+//
+// 电平：CONST_OUT_GAIN_DB = −1.2dB（75Hz 处净增益约 +1.3dB，留出低频余量；中频净 −1.5dB，
+//   A 计权 × 典型混音谱粗估整体响度约 −1.6dB）。CONST_OUT_LIMIT 保持 0（不开软饱和，避免压缩正常电平）。
+// ==========================================================================
+// ==========================================================================
+// [X176 Freedom] 自由节点母版 —— 由 X176 1.7.31 Core 演化而来
+//
+// 固定不变（与 1.7.31 完全一致）：
+//   * 引擎拓扑：SVF 输入级 → 塑形/动态组 → APF → EQ 输出（模块顺序不可配置）
+//   * spread / warp / filter_mix / filter_lp 挂在 Dyn 链下，需 set_p_dyn 启用载体
+//   * M/S 双通道处理框架与全局 Width / Phase / Gain 常量行为
+//
+// 版本线：X176 Freedom 1.8.40 = 多段处理能力补全（N1..N5：BQ shelving S / BAND 可调斜率+pan+段选择 / XOVER 段选择，详见 [1.8.40 变更清单]）
+//
+// LiveProg(JamesDSP) 兼容：全文注释中禁止出现两个段落标记字样——
+// 其解析器对全文做首个匹配切片，不区分注释，写了就会被误认成段落起点
+// （顺带：注释内也不再出现裸标记字符，杜绝任何"按裸标记切片"实现的歧义）
+//
+// ---- [1.8.35 变更清单] 基于五模型交叉审查的裁决结果 ----
+//  P1 修：set_p_filter_lp 的 res 上限 0.95 → 0.70（原为低频正反馈量，最坏 +31 dB）
+//  P1 修：set_p_spread 的 s_amt 增加 clamp（原无上限，环增益 = s_amt×0.6，>1.667 即失控）
+//  P2 修：set_p_warp  的 h_stretch 增加 clamp（wrap 关闭时为纯二次增益扩展）
+//  P2 修：set_p_apf   的 fb_ff 上限 0.95 → 0.90（环增益 20× → 10×）
+//  P2 修：PHASE_COEFF / WIDTH_MUL / P_EQ_DAMPING 三个全局量增加钳位
+//  P2 修：set_p_ms 权重增加上限（MS_W_MAX）
+//  P1 修：rebuild_active_list 过滤"权重全 0"节点（原会进表空转）
+//  P2 增：sample 段 三表分流（dual / mid-only / side-only），循环体内零分支
+//  P2 增：可选输出软限幅 CONST_OUT_LIMIT（默认 0 = 关闭，逐样本结果与 1.8.34 一致）
+//  P3 增：M_AP[0]/[1] 显式清零（不再依赖宿主初始化行为）
+//  P3 增：node_begin 写入 Flex 分母默认值（set_p_flex 内的 0 值 hack 保留作双保险）
+//  P0 修：三副本纪律注释"逐字节镜像"→"语义镜像"（原措辞与 dual 的 5 项预取自相矛盾）
+//  P3 修：单通道引擎体同步 dual 的 5 项预取，使三份文本结构真正可比
+//  文档：APF 单独启用恒静音、塑形链供料恒为 SVF 带通 v1、参数表空洞说明
+//
+//  未采纳（附理由，避免后人重复提出）：
+//   * SVF 内 g_tpt/g_tan 并存是 TPT 拓扑固有特征，非"混用"，改动即毁音色基线
+//   * flag 位打包（& | ~）：技术可行但需与三副本同步维护位表，收益/风险比不划算
+//   * memset 替代 init 段 清零：只在初始化段运行，CPU 收益严格为 0
+//   * dual 退回"调用两次 single"：等于删掉已有优化
+//   * ext_nodenorm / REAPER 专有扩展：本文件目标宿主为 JamesDSP，写入即破兼容
+//
+//  适用前提（采样率耦合）：SAFE_SR_LIMIT、SMOOTH_* 与各滤波系数均在 init 段 依 srate 计算。
+//  若目标宿主切换采样率时不重跑 init 段，这些量会静默过期。REAPER 切 SR 会重建实例（安全），
+//  JamesDSP 如遇异常请重载脚本。
+// ==========================================================================
 
+// ==========================================================================
+// 更早的更新日志（1.8.36 含 Maintain、1.8.37）已整块移入 更新日志.txt，原文未改。
+// ==========================================================================
+// [1.8.38 变更清单] 声音编辑积木第二批 —— 频谱编辑 + 动态域编辑
+//
+// 延续 1.8.37 的立论：primitive 只需满足「吃 (il,ir)、吐 (S_OL,S_OR)」契约，
+//   故新增能力 = 扩枚举 + 写 s_p_* / s_add_* + dispatch 加一行。本轮同样零改动
+//   三份镜像引擎体、节点 setter、预设区节点配置、采样段节点循环。
+// 内建函数纪律：仍只用 1.8.35 基线那 11 个（abs cos exp floor loop max min pow
+//   sin sqrt tan）。本轮未引入任何新内建（脚本核验）。
+//
+//  * K1【B1·BQ】双二阶滤波器：cookbook 9 种 + 用户裸系数。
+//      s_add_bq(type, freq, Q, gain_db)：LP / HP / BP恒Q / BP恒峰值 / Notch /
+//                                        AP二阶 / Peak / LoShelf / HiShelf / AP一阶
+//      s_add_userbq(b0,b1,b2,a1,a2, stabilize)：裸系数，可直接填任意二阶。
+//      ⚠ 稳定性：cookbook 生成的天然稳定（fc 与 Q 已钳位）。裸系数提供了
+//        stabilize=1 兜底——按极点半径 ρ 缩放：a1' = a1/ρ、a2' = a2/ρ²
+//        （ρ 由判别式分区解析求得：a1²<4a2 → ρ=√a2 复根；否则取实根最大模）。
+//        实测 6 组（含发散实根 / 负 a2 / 纯 a2>1）缩放后 ρ' 一律 < 1。
+//        stabilize=0 = 原样使用，稳定性自负（积木优先，不禁止）。
+//  * K2【B2·XOVER】Linkwitz-Riley 功率互补分频（LR2 12dB/oct / LR4 24dB/oct）。
+//      与既有 BAND 的区别：BAND 是一阶残差级联（不平坦、6dB/oct）；
+//      XOVER 各段求和幅度恒等于输入 → 可做真正的多段饱和/多段混响/多段动态。
+//      LR4 严格证明：|Σ| = 1（令 u=ω²，|分母|² = (u²-4u+1)²+8u(1-u)² = (u²+1)²）。
+//      LR2 必须把 HP 反相才是功率互补（实测：不反相在 fc 处 |Σ|=0，反相 =1）。
+//      ⚠【架构决定】用串行级联而非并行：并行「band_k = HP(f_{k-1})·LP(f_k)」对
+//        LR2 彻底失效——实测 3-way 凹陷 17.23dB，因为 LR2 的互补式是 LP-HP=1，
+//        而并行结构在高频段给出 -(LP+HP)。串行把 LR2 3-way 从 17.23dB 改善到 0.20dB。
+//      ⚠【实测·写入者必读】多段求和的平坦度依赖分频点间隔（20Hz–20kHz 全频段扫描）：
+//          LR4: 2-way 0.00dB ｜ 3-way 3oct 0.18dB、1oct 3.57dB ｜ 4-way 3oct 0.18dB、1oct 4.47dB
+//          LR2: 2-way 0.00dB ｜ 3-way 3oct 0.20dB、1oct 1.69dB ｜ 4-way 3oct 0.21dB、1oct 3.96dB
+//        成因（不是实现缺陷）：① 数字域 (BW2_digital)² ≠ LR4_digital——双线性变换
+//        不是线性算子；② LR 的 LP+HP 是"全通"而非恒等于 1（幅度恒 1 但相位随频率
+//        变化），多级串联时相位累积。→ 建议分频点间隔 ≥ 3 倍频程（误差 <0.25dB）。
+//      ⚠ 需要密集分频且要求严格重建 → 改用 BAND：一阶残差级联是望远镜求和，
+//        各段互斥且求和严格 = 输入（代价是只有 6dB/oct，过渡带很宽）。
+//      ⚠ LR2 必须把 HP 反相（sg=-1）：互补式是 LP-HP=1；不反相实测 2-way 凹陷 63.89dB。
+//      配置期自动按升序排序分频点，用户乱序填写也能正确工作（消除一类误用）。
+//  * K3【A5·DYN】动态增益单元 + GR 作为调制源。
+//      thresh / ratio / knee / atk / rel / RMS窗 / makeup / g_max。
+//      ⚠ 为什么不用 dB 域公式：dB 转换需要 log10，它不在已验证内建清单内。
+//        改用线性域精确等价式：gain = (x/t)^(1/ratio - 1)
+//        ——解析证明与 dB 域公式逐点等价，实测最大相对误差 2.68e-16。
+//      ⚠ 软拐点同样在线性域实现：过渡区以 g_hard(hi) 为终点、smoothstep 混合。
+//        （早期方案用随 x 变化的 g_hard(x) 会在 x<t 时算出 >1 的增益——已修正；
+//         实测修正后：单调不增、恒 ≤1、端点连续、knee=0 精确退化为硬拐点。）
+//      GR 输出到 S_ENVV[gr_id]（与 ENV 共用数组）→ MUL 可直接引用做闪避。
+//  * K4【A6·TRANS】瞬态设计：env_fast − env_slow 归一化 → 瞬态增益。
+//      ⚠ 实测标定（3s 收敛信号取最后 1s 统计，440Hz 稳态正弦）：
+//          稳态 diff 均值严格 = 0.000000 ✓
+//          但存在波动：fast=1ms → nd 峰峰 0.234；5ms → 0.046；20ms → 0.0096
+//        → fast 建议 ≥5ms（对音频）。太短会把稳态波形起伏误判为瞬态并调制增益。
+//      ⚠ nd 在起振瞬间可达 17~86 量级（取决于 fast），必须 clamp —— nd_max 默认 1。
+//      ⚠ 衰减段 nd 为负（实测 −0.995），故默认只取正部（pos_only=1）。
+//      静音段：nd = 0/(0+floor) = 0，不会除零或放大噪声（实测恒 0 ✓）。
+//
+// 一致性声明：默认路径（总线全关）与 1.8.37 / R2 / Maintain 系列逐样本一致；
+//   新增 primitive 仅在用户显式配置时才进入链，运行期每样本指令数不变。
+// ==========================================================================
+// [1.8.39 变更清单] 声音编辑积木第三批 —— 声源与房间声学解析
+//
+// 本轮新增 1 个运行期 primitive（NOISE）+ 2 个配置期生成器（ISM / ROOMMODES）
+//   + 1 处既有 primitive 的能力扩展（FDN 每线吸收滤波器）。
+//   两个生成器把"房间"这一层抽象落地：几何算完即退化为已有的 TAP / RESO，
+//   运行期零额外成本——这正是配置期计算的意义所在。
+//
+//  * M1【C3·NOISE】噪声源（白 / 粉 / 棕）。
+//      PRNG 沿用 s_hash（与 F4 同源）。实测质量：均值 +0.0013、方差 0.33336
+//        （理论 1/3）、lag1–16 自相关 |ρ| < 0.006、16 段频谱平坦度 0.505 dB。
+//      粉噪 = Paul Kellet 7 节近似：实测斜率 −3.066 dB/oct（目标 −3.0）✓
+//        ⚠ 该滤波器输出 RMS 是白噪的 3.06 倍、峰值因子约 4.3 —— 故内置 RMS
+//        归一化系数（粉 0.3268），并由 level 控制最终幅度。默认 level 请开小。
+//      棕噪 = 泄漏积分器 y = a·y + (1−a)·w（DC 增益恰为 1，不会无界漂移）；
+//        归一化系数 √(3(1+a)/(1−a)) 在配置期算好。
+//      左右用独立 PRNG 状态（Z15/Z16）→ 天然去相关；粉/棕各自独立状态链。
+//      ⚠【实测·陷阱】左右必须用"不同的 hash 常数对"：Z15/Z16 都从 0 起同步 +1，
+//        若两侧都用 (×7.31 + 311.7)，则 s_hash 输入完全相同 → 左右输出逐样本
+//        相等，实测相关 = +1.00000（等于单声道噪声）。故右通道改用 (×11.17 + 733.3)，
+//        实测相关 −0.0034、右通道方差 0.3318（理论 1/3）、斜率 −0.007 dB/oct ✓。
+//      ⚠ 这不是加密级 PRNG：确定性、周期极长，但只保证统计特性够用。
+//
+//  * M2【C1·ISM】镜像声源 → 配置期生成 TAP。
+//      Allen-Berkley 镜像法：镜像位置 x_u = u·Lx + (u 偶 ? sx : Lx−sx)，
+//        延迟 t = d/c，增益 g = βx^|u|·βy^|v|·βz^|w| / d。
+//      生成后按 |g| 取前 n_taps（≤ TAP_MAX=64），再按时间升序写 tap → 退化成
+//        普通 TAP primitive，运行期与手写 tap 完全等价、零额外成本。
+//      ⚠【实测·必须 clamp】源/听者都贴近墙角时 1/d 会爆炸：实测某极端配置
+//        最大 tap 增益 9.50（正常配置约 0.26）。故生成时一律 clamp 到 ±1，
+//        并可选归一化（除以最大 |g|）——这是几何方法的固有奇点，不是 bug。
+//      ⚠ 适用前提（写入者必读）：镜像法是几何声学近似，只在"波长 << 房间尺寸"
+//        成立，即 f > Schroeder 频率 f_s = 2000·√(T60/V)。低频请用 ROOMMODES。
+//        另：假设矩形房间、各面反射系数为单一均值（不区分六面各自材质）。
+//
+//  * M3【C2·ROOMMODES】矩形房间解析模态 → 配置期生成 RESO。
+//      f = (c/2)·√((nx/Lx)² + (ny/Ly)² + (nz/Lz)²)，取最低的 n 个（≤ MODE_MAX=32）。
+//      按模态类型加权（轴向 1.0 / 切向 0.71 / 斜向 0.5）——轴向模态能量最强。
+//      ⚠ 与 ISM 互补而非替代：本方法只覆盖 f < f_s 的模态区。实测 5×4×3m 房间
+//        （V=60m³, T60=0.6s）f_s = 200Hz；取最低 32 个模态仅覆盖 34.3–140.8Hz。
+//        更密的模态（<300Hz 有 208 个）受 MODE_MAX 限制无法全取——这是有意的
+//        资源取舍，高频模态改用 ISM / FDN 的统计式扩散处理。
+//      ⚠ T60 随频率的插值是线性的（不是对数），因为 log 内建不可用。物理上
+//        T60–频率更接近对数关系，故此插值为近似，可调 t60_low / t60_high 补偿。
+//
+//  * M4【B3·FDN 频变 T60】每线环内吸收滤波器。
+//      形式 H(z) = g + (1−g)·H_lp(z)：DC 增益恒 1、高频增益 = g、中间单调。
+//      ⚠ 稳定性证明（这是选这个形式的唯一理由）：g ∈ (0,1] 时 |H(f)| ∈ [g,1]，
+//        恒 ≤ 1 —— 实测 4 组参数全部"单调不增且 max ≤ 1"。配合已有的 g_i < 1，
+//        环增益 g_i·|H(f)| < 1 严格成立，FDN 不会因吸收滤波器而发散。
+//        （若做成可 boost 的 shelf，|H| 会 >1 并可能自激——刻意只允许衰减。）
+//      有效衰减 g_eff(f) = g_i·|H(f)| → T60 随频率变化。实测：abs_db 从 0 增到
+//        10dB 时，T60_HF/T60_DC 比值从 1.00 降到 0.15 量级（低频混响更长）。
+//      abs_db = 0 时 g = 1 → 分支不执行，与 1.8.38 逐样本一致（向后兼容）。
+//
+// 一致性声明：默认路径（总线全关 / abs_db=0）与 1.8.38 / 1.8.37 / R2 逐样本一致；
+//   三份镜像引擎体、节点 setter、预设区节点配置、采样段节点循环仍零改动。
+// ==========================================================================
+// [1.8.40 变更清单] 多段处理能力补全 + 缺陷补足
+//
+// 主线：把"多段处理"从"能分频"推进到"能对每一段做不同处理"。
+//   此前 XOVER 与 BAND 都只能输出各段之和 —— 分频之后各段又被立刻加回去，
+//   无法对某一频段单独加饱和/压缩/混响。本轮给两者都加"段选择 out_sel"：
+//   同一条分频器在不同总线上各取一段，各自处理，再靠总线返回叠加回主路。
+//   零新架构（总线返回本来就是叠加的），代价只是滤波器被重复计算。
+//
+//  * N1【P2·承诺未兑现】s_add_bq 的 Q 参数对 LoShelf / HiShelf 完全无效。
+//      原实现写死了 shelf slope S = 1：alpha = sin(w0)/2 · √((A+1/A)·(1/1−1)+2)。
+//      实测 S=0.5 / 1.0 / 2.0 三档给出的 alpha 完全相同（0.092296）——
+//      即"Q"这一路参数在两个 shelf 类型上是死参数。
+//      修复：以 Q 作为 S（S 越大过渡越陡），下界 0.1、上界 5。
+//      ⚠ 上界不能固定为 5：根号内 (A+1/A)·(1/S−1)+2 必须 ≥ 0，而 S 偏大 +
+//        增益偏大时会为负 → sqrt 得 NaN。实测临界 S_max 随增益急剧下降：
+//        +6dB→17.6、+12dB→5.03、+18dB→2.71、+24dB→1.90、+30dB→1.53。
+//        故上界按增益动态收紧到"根号内 ≥ 0.05"：S ≤ 1/(1 + (0.05−2)/(A+1/A))。
+//        全域扫描 1344 组（S ∈ {0.1..5} × 增益 ±3..30dB × 7 个频率 × Lo/Hi）：
+//        NaN 数 0、根号内最小值恰为 0.05、最坏极点半径 ρ = 0.999815 < 1。
+//        ⚠ ρ 接近 1 只在用户显式传大 S 时出现（= 极窄过渡带的"高 Q"极限，
+//        数学上稳定、不会发散）；默认 S=1 时 ρ ≈ 0.896，余量充足。
+//      ⚠ 行为变化：原等效于 S=1。若现有配置给 shelf 传了 Q≠1，音色会变。
+//
+//  * N2【P3】FDN 每线吸收滤波器的 AZ 状态缺 DENORM_NOISE。延迟线写入端已有
+//      （nv 计算里 + DENORM_NOISE），故 y 不会 denormal，AZ 实际是安全的；
+//      但吸收把 y 再衰减一道，强吸收（abs_db 大）时余量变小。补注入，零风险。
+//
+//  * N3【P3】s_add_band 无条件为每一段分配延迟缓冲（即使 dly=0），与 XOVER
+//      的按需分配不一致。改为 DLY ≥ 1 才分配，节约延迟池。
+//
+//  * N4【重大·BAND 升级】可调斜率 + 逐段 pan + 段选择，且严格重建不变。
+//      - 斜率：分频滤波器由单级一阶 LP 改为 1~4 级级联 → 6 / 12 / 18 / 24 dB/oct。
+//        实测 200Hz 落入低频段的串扰：ord=1 +14.6dB → ord=4 +2.4dB。
+//      - 逐段 pan：新增 S_BD_GL / S_BD_GR（L/R 独立增益），s_band_pan(k, gl, gr)。
+//        此前每段只有 width（S 增益），无法把某段推向左或右。
+//      - 段选择 out_sel：-1 = 各段求和（默认）；0..n-1 = 仅输出该段。
+//      ⚠ 严格重建的证明（这是 BAND 相对 XOVER 的核心优势）：
+//        望远镜求和 band_k = x_k − LP^n(x_k)、x_{k+1} = LP^n(x_k)，
+//        故 Σ band_k = (x_0−x_1)+(x_1−x_2)+…+x_{nb−1} ≡ x_0。
+//        这是逐样本恒等，与阶数 n 无关、与分频点间隔无关。
+//        实测 ord=1..4 × {1k / 200-1600 / 200-400-800} 共 12 组，
+//        重建误差一律 ≤ 4.44e-16（浮点精度）。
+//      → 于是"密集分频 + 严格重建"这一 XOVER 做不到的场景（实测 XOVER
+//        1oct 有 1.69~4.47dB 凹陷）由 BAND 覆盖。两者现在是真正互补的：
+//          XOVER：24dB/oct 陡峭、需 ≥3oct 间隔、幅度重建有微小误差
+//          BAND ：6~24dB/oct 可选、任意间隔、逐样本严格重建
+//
+//  * N5【重大·XOVER 段选择】s_add_xover 新增 out_sel，语义同 N4。
+//      实测：Σ(各段单独输出) 与"求和输出"逐样本完全一致（最大差 < 1e-12）。
+//      ⚠ out_sel ≥ 0 时其余各段仍照常计算（滤波状态必须保持预热，否则
+//        切换段选会爆音），只是不累加进输出 —— 这是刻意的，不是浪费。
+//      ⚠ 只输出一段时请把 dry 设 0，否则会把全带干声一起混进来。
+//
+//  * 多段处理的标准接法（配合 1.8.37 的 s_bus_src / 总线叠加返回）：
+//      总线 0：s_add_xover(0, 3, 4, 0, 1.0, 0.0)  → 低频段 → TABLE 饱和
+//      总线 1：s_add_xover(1, 3, 4, 1, 1.0, 0.0)  → 中频段 → DYN 压缩
+//      总线 2：s_add_xover(2, 3, 4, 2, 1.0, 0.0)  → 高频段 → FDN 混响
+//      三条总线的返回各自叠加回主路 = 完整的多段处理链。
+//
+// 一致性声明：默认路径（总线全关 / out_sel = −1 / BAND ord 沿用旧值 1 的语义）
+//   与 1.8.39 Patched 逐样本一致；三份镜像引擎体、节点 setter、预设区节点配置、
+//   采样段节点循环仍零改动。
+// ==========================================================================
+// ==========================================================================
+//[SECTION 1] Global Static Configuration
+// ==========================================================================
+@init
+CONST_IN_GAIN_DB  = 0.0;
+CONST_OUT_GAIN_DB = -1.2; // [Warm Body] 75Hz 处净增益约 +1.3dB，留低频余量（纯线性增益，不染色；嫌小声可调回 0）
+CONST_WIDTH_COMP  = 0.0;
+CONST_PHASE_DISP  = 0.0;
+CONST_HUE_GLOBAL  = 0.0;
+CONST_DAMPING     = 0.0; // 1.7.31 调音常量：P_EQ_DAMPING=CONST_DAMPING×EQ_DAMPING_SCALE，仅 Dyn 载体消费——改动即变声
+CONST_OUT_LIMIT   = 0.0; // 0=关闭（默认）；1=启用输出软饱和限幅
+
+// ---- 全局安全钳位上限 ----
+MS_W_MAX     = 4.0;   // set_p_ms：单通道权重上限（防止手滑写入极大值）
+FILTER_RES_MAX = 0.7; // set_p_filter_lp：res 上限（稳态低频增益 1/(1-res)，0.7 → +10.5 dB）
+SPREAD_AMT_MAX = 0.95;// set_p_spread：|SPREAD_AMT| 上限（环增益必须 < 1）
+WARP_STRETCH_MAX = 1.0; // set_p_warp：|h_stretch| 上限（×1.5 → |stretch| ≤ 1.5）
+APF_FB_MAX   = 0.9;   // set_p_apf：|fb_ff| 上限（环增益 1/(1-fb)，0.9 → 10× / +20 dB）
+SPREAD_COLOR_MAX = 5.0; // set_p_spread：|s_color| 上限（防 exp 中间量溢出）
+
+// ---- 节点规模 ----
+MAX_NODES  = 10;     // 节点硬上限（预设有效节点号 1..MAX_NODES；扩大上限见下方基址表注释）
+NODE_STRIDE = 110;   // 每个节点在参数数组中占用的长度
+CH_OFFSET   = 2000;  // 同类状态数组的 side 通道相对 mid 通道的基址偏移（须 > 110*MAX_NODES）
+
+// ---- 各状态数组实际使用的槽数（node_begin 工厂复位用）----
+ST_SLOTS   = 7;      // st[]：     最高索引 ST_BQ_1 = 6
+SAT_SLOTS  = 14;     // sat_st[]： 最高索引 SAT_ST_TONE_SMOOTH = 13
+APF_SLOTS  = 65;     // apf_st[]： 最高索引 APF_ST_64 = 64（含 2 阶级联暂存）
+
+// ---- 内存基址表（按 MAX_NODES = 10 规划，各区间互不重叠）----
+// p[] 参数区：        节点 i → M_P + 110*i .. +109            （节点 10 顶 = 1209）
+// st/sat/apf 状态区： 节点 i → 基址 + 110*i；side 通道再加 CH_OFFSET
+//
+// 扩大 MAX_NODES 的步骤（当前间距下布局最大支持 17）：
+//   1) MAX_NODES 改为目标值 N（N ≤ 17 时无需其他改动）
+//   2) N > 17 时：CH_OFFSET 调大到 > 110*N + 110，并按新跨度同步右移
+//      M_S_SIDE / M_SAT / M_AP / M_APF（保持各区间互不重叠）
+M_P       = 0;
+M_S_MID   = 2000;
+M_S_SIDE  = 4000;
+M_SAT     = 6000;
+M_AP      = 10000;
+M_APF     = 10500;
+
+// ---- EQ 类型枚举（set_p_eq 的 type 参数与 P_EQ_TYPE 的取值） ----
+TYPE_LP        = 0;   // 低通（SVF）
+TYPE_HP        = 1;   // 高通（SVF）
+TYPE_PEAK_SVF  = 2;   // 峰值提升（SVF）
+TYPE_LO_SHELF  = 3;   // 低架（RBJ Biquad）
+TYPE_HI_SHELF  = 4;   // 高架（RBJ Biquad）
+TYPE_PEAK_BQ   = 5;   // 峰值提升（RBJ Biquad）
+
+// ==========================================================================
+// [CONSTANTS] 魔法数字索引映射字典 (p[], st[], sat_st[], apf_st[])
+// ==========================================================================
+// ---- p[] 字段命名表：EQ 模块 ----
+P_EQ_G_TPT          = 0;
+P_EQ_GK             = 1;
+P_EQ_K_DAMP         = 2;
+P_EQ_G_TAN          = 3;
+P_EQ_TYPE           = 4;
+P_EQ_GAIN_K         = 5;
+P_EQ_DAMPING        = 6;
+P_EQ_FREQ_HZ        = 10;
+P_EQ_V1_C1          = 91;
+P_EQ_V1_C2          = 92;
+P_FLAG_EQ_ACTIVE    = 94;
+P_BQ_B0             = 95;
+P_BQ_B1             = 96;
+P_BQ_B2             = 97;
+P_BQ_A1             = 98;
+P_BQ_A2             = 99;
+P_BQ_TYPE_5         = 100;
+
+// ---- p[] 字段命名表：M/S 权重 ----
+P_MS_MID_W          = 7;
+P_MS_SIDE_W         = 8;
+
+// ---- p[] 字段命名表：Comb 模块 ----
+P_COMB_BASE         = 9;
+P_COMB_FINAL        = 88;
+
+// ---- p[] 字段命名表：Even 模块 ----
+P_EVEN_BASE         = 11;
+P_EVEN_MULT         = 12;
+P_EVEN_FINAL        = 89;
+
+// ---- p[] 字段命名表：APF 模块 ----
+P_APF_A1            = 13;
+P_APF_A2            = 14;
+P_APF_STAGES        = 15;
+P_APF_FB_FF_POS     = 16;
+P_APF_FB_FF_NEG     = 17;
+P_APF_MIX_POL       = 18;
+P_APF_INV_MIX       = 19;
+P_APF_MIX_ACTIVE    = 20;
+P_APF_ORDER2        = 21;
+
+// ---- p[] 字段命名表：Odd 模块 ----
+P_ODD_BASE          = 22;
+P_ODD_MULT          = 23;
+P_ODD_FINAL         = 80;
+
+// ---- p[] 字段命名表：Sharp 模块 ----
+P_SHARP_BASE        = 24;
+P_SHARP_MULT        = 25;
+P_SHARP_FINAL       = 81;
+
+// ---- p[] 字段命名表：Hue 模块 ----
+P_HUE_BASE          = 26;
+P_HUE_MULT          = 27;
+P_HUE_FINAL         = 82;
+
+// ---- p[] 字段命名表：Sq 模块 ----
+P_SQ_BASE           = 28;
+P_SQ_MULT           = 29;
+P_SQ_FINAL          = 83;
+
+// ---- p[] 字段命名表：Tri 模块 ----
+P_TRI_BASE          = 30;
+P_TRI_MULT          = 31;
+P_TRI_FINAL         = 84;
+
+// ---- p[] 字段命名表：Saw 模块 ----
+P_SAW_BASE          = 32;
+P_SAW_MULT          = 33;
+P_SAW_FINAL         = 85;
+
+// ---- p[] 字段命名表：Fold 模块 ----
+P_FOLD_BASE         = 34;
+P_FOLD_MULT         = 35;
+P_FOLD_FINAL        = 86;
+
+// ---- p[] 字段命名表：Tone 模块 ----
+P_TONE_FREQ_COEFF   = 36;
+P_TONE_BASE         = 37;
+P_TONE_MULT         = 38;
+P_TONE_FINAL        = 87;
+
+// ---- p[] 字段命名表：Flex 模块 ----
+P_FLEX_DENOM        = 42;
+P_FLEX_AX_COEF      = 43;
+P_FLEX_LEVEL_COMP   = 58;
+P_FLEX_BASE         = 59;
+P_FLEX_MULT         = 60;
+P_FLEX_FINAL        = 61;
+
+// ---- p[] 字段命名表：Route / Flags 模块 ----
+P_FLAG_GRP_SOFT     = 39;
+P_FLAG_V1_SOFT10    = 40;
+P_FLAG_V1_SOFT02    = 41;
+P_FLAG_GLOBAL_ACTIVE= 103;
+P_FLAG_NODE_ACTIVE  = 104;
+
+// ---- p[] 字段命名表：Dyn 模块 ----
+P_DYN_MULT          = 44;
+P_DYN_SPEED         = 45;
+
+// ---- p[] 字段命名表：Spread & Warp & Filter 模块 ----
+P_SPREAD_AMT        = 46;
+P_SPREAD_COLOR      = 47;
+P_WARP_H_STRETCH    = 48;
+P_WARP_W_WRAP       = 49;
+P_WARP_H_FLIP_SIGN  = 50;
+P_WARP_X_SAW        = 51;
+P_WARP_INV_WRAP     = 52;
+P_FILTER_MIX        = 53;
+P_FILTER_MIX_TAN    = 54;
+P_FILTER_LP_FREQ    = 55;
+P_FILTER_LP_SLOPE   = 56;
+P_FILTER_LP_RES     = 57;
+P_FLAG_WARP_FLIP    = 90;
+P_FLAG_WARP_ACTIVE  = 93;
+
+// ---- st[] 字段命名表 ----
+ST_EQ_0             = 0;
+ST_EQ_1             = 1;
+ST_COMB_DIFF        = 2;
+ST_EVEN_DRY         = 3;
+ST_BQ_0             = 5;
+ST_BQ_1             = 6;
+
+// ---- sat_st[] 字段命名表 ----
+SAT_ST_DYN_0           = 0;
+SAT_ST_DAMP_AX_PREV    = 1;
+SAT_ST_DAMP_SMOOTH     = 2;
+SAT_ST_DC_OFFSET       = 3;
+SAT_ST_SPREAD_PREV     = 5;
+SAT_ST_SPREAD_SMOOTH   = 9;
+SAT_ST_WARP_Y_PREV_IN  = 10;
+SAT_ST_WARP_Y_PREV_OUT = 11;
+SAT_ST_LP_SMOOTH       = 12;
+SAT_ST_TONE_SMOOTH     = 13;
+
+// ---- apf_st[] 字段命名表 ----
+APF_ST_0            = 0;
+APF_ST_1            = 1;
+APF_ST_64           = 64;
+// 注：p[] 索引 62-79 / 101-102 / 105-109 为空洞（1.7.31 布局遗留），不可复用为新增字段——
+// NODE_STRIDE=110 的跨节点步进依赖"整块清空"，重排无收益且破坏兼容。新增字段请用 105-109。
+// ==========================================================================
+
+SR_INV = 1.0 / srate;
+PI = 3.141592653589793;
+TWO_PI = 6.283185307179586;
+HALF_PI = 1.570796326794897;
+LN10_DIV_20 = 0.115129254649702;
+
+DENORM_NOISE = 0.0000000001;
+SAFE_SR_LIMIT = srate * 0.495;
+
+I_G = exp(CONST_IN_GAIN_DB * LN10_DIV_20);
+O_G = exp(CONST_OUT_GAIN_DB * LN10_DIV_20);
+WIDTH_MUL = max(0.0, 1.0 + CONST_WIDTH_COMP);              // 负值会使侧声道反相，钳到 0
+PHASE_COEFF = max(-0.95, min(0.95, CONST_PHASE_DISP * 0.15)); // |coeff| ≥ 1 时一阶全通不稳定
+SPREAD_LOG_K = -2.995732274;
+
+SQ2_INV  = 0.7071067811865476;  // 1/√2（Butterworth Q，LR4 用）
+SAFE_A = 0.001;   // 1.7.31 调音内部尺度（SVF 增益/组合系数）——改动即变声
+SAFE_B = 1000.0;  // 1.7.31 调音内部尺度（组合系数幅值域）——改动即变声
+SQ_LEVEL_COMP = 0.07;
+
+// ---- 模块内部调参常数 ----
+EQ_DAMPING_SCALE    = 0.5;   // set_p_eq: CONST_DAMPING 缩放
+HUE_EVEN_BASE_SCALE = 1.2;   // set_p_even / set_p_hue: 基础量缩放
+SHARP_BASE_SCALE    = 2.0;   // set_p_sharp: 基础量缩放
+COMB_BASE_SCALE     = 2.0;   // set_p_comb: 基础量缩放
+SPREAD_AMT_SCALE    = 0.6;   // set_p_spread: 扩展量缩放
+WARP_STRETCH_SCALE  = 1.5;   // set_p_warp: 水平拉伸缩放
+WARP_WRAP_MIN       = 0.05;  // set_p_warp: wrap 下限
+WARP_WRAP_MAX       = 3.0;   // set_p_warp: wrap 上限
+WARP_WRAP_AMT       = 2.95;  // set_p_warp: wrap 系数
+WARP_XSAW_SCALE     = 6.0;   // set_p_warp: x_saw 缩放
+
+// ---- 平滑系数：采样率归一化（以 SMOOTH_REF_SR 为基准，不同采样率下时间常数一致） ----
+SMOOTH_REF_SR           = 48000.0;  // 校音基准采样率；若以 44.1k 校音请改为 44100.0
+SMOOTH_RATIO            = SMOOTH_REF_SR * SR_INV;   // = 基准采样率 / 当前采样率
+DAMP_SMOOTH_COEFF_REF   = 0.1;    // 基准采样率下的阻尼平滑系数
+DC_FILTER_COEFF_REF     = 0.005;  // 基准采样率下的直流偏移滤波系数
+EVEN_SMOOTH_COEFF_REF   = 0.005;  // 基准采样率下的偶次谐波平滑系数
+
+DAMP_SMOOTH_COEFF = 1.0 - pow(1.0 - DAMP_SMOOTH_COEFF_REF, SMOOTH_RATIO);
+DC_FILTER_COEFF   = 1.0 - pow(1.0 - DC_FILTER_COEFF_REF, SMOOTH_RATIO);
+EVEN_SMOOTH_COEFF = 1.0 - pow(1.0 - EVEN_SMOOTH_COEFF_REF, SMOOTH_RATIO);
+
+SAW_DECAY_K         = 0.6;   // process_engine_atomic: saw 塑形衰减
+SQ_DENOM_MIN        = 0.05;  // process_engine_atomic: sq 塑形分母下限
+SHARP_SOFT_K        = 0.5;   // process_engine_atomic: sharp 软限幅
+WARP_XSAW_FRAC      = 0.45;  // process_engine_atomic: warp x_saw 分数混入
+APF_STAGES_MIN      = 1;     // set_p_apf: 级数下限
+APF_STAGES_MAX      = 32;    // set_p_apf: 级数上限
+
+M_HALF_IG  = 0.5 * I_G;
+FLAG_GAIN  = (CONST_IN_GAIN_DB != 0.0 || CONST_OUT_GAIN_DB != 0.0) ? 1.0 : 0.0;
+FLAG_WIDTH = CONST_WIDTH_COMP != 0.0 ? 1.0 : 0.0;
+FLAG_PHASE = CONST_PHASE_DISP != 0.0 ? 1.0 : 0.0;
+
+// ==========================================================================
+// SPATIAL BUS · 全局常量与内存基址表
+// ==========================================================================
+// ---- 规模（改这些值，下面全部基址自动重算）----
+BUS_MAX      = 2;        // 总线数（典型用法：0 = 近场/早期，1 = 尾场/混响）
+STAGE_MAX    = 16;       // 每条总线的 primitive 级数上限
+TAP_MAX      = 64;       // 单个 TAP / DIFF 的抽头数上限
+FDN_N_MAX    = 16;       // FDN 线数上限
+MOD_MAX      = 8;        // 调制源个数上限
+ENV_MAX      = 8;        // 包络检波器个数上限
+XO_BAND_MAX  = 4;        // XOVER 分频段数上限
+MODAL_NMAX   = 7;        // ROOMMODES 每维模态序数上限（→ 候选 ≤ 8³ = 512）
+ISM_NMAX     = 512;      // ISM 镜像候选中枢容量（order ≤ 3 → 343 ≤ 512）
+SOUND_C      = 343.0;    // 声速 m/s（20℃ 干空气；改温度请调此值）
+CURVE_N      = 256;      // TABLE 曲线点数上限
+MODE_MAX     = 32;       // RESO 模态个数上限
+BAND_MAX     = 4;        // BAND 分频段数上限
+BAND_ORD_MAX = 4;        // BAND 分频斜率级联上限（1..4 → 6/12/18/24 dB/oct）
+DECO_N_MAX   = 8;        // DECO 去相关链级数上限
+BUS_POOL     = 131072;   // 每条总线的延迟池槽数（48k ≈ 2.7 s / 96k ≈ 1.37 s）
+//   若宿主拒绝大数组：降到 32768（48k 下约 0.68 s）仍可跑早期反射 / 近场 / 调制类总线；
+//   真混响尾（FDN / LOOP）建议不低于 65536。溢出时 S_OVERFLOW 置 1 并自动截断分配。
+//   槽位占用：按本表重算，顶端 S_TOP ≈ 3.32e5。
+//     加载失败请先降到 16384 试（顶 ≈1.0e5）；65536 → ≈2.0e5；32768 → ≈1.35e5。
+//     S_OVERFLOW=1 表示池已耗尽：后续分配被截断到同一地址，缓冲互相重叠（保护性
+//     降级，不是安全机制）—— 见该标志请调大 BUS_POOL 或减少总线/级数。
+S_SR_ALLOC   = max(96000.0, srate);   // 按此采样率分配长度；切 SR 不重跑初始化仍有余量
+S_HR         = S_SR_ALLOC * SR_INV;   // 分配余量系数（≥ 1）
+
+// ---- 记录跨度 ----
+S_STAGE_STRIDE = 48;   // stage：type/buf/len/wp + A0..A23 + Z1..Z19
+S_TAP_STRIDE   = 10;   // 抽头
+S_FDN_STRIDE   = 15;   // FDN 线（含吸收滤波器 3 槽）
+S_MODE_STRIDE  = 10;   // RESO 模态
+S_BAND_STRIDE  = 20;   // BAND 段（含斜率级联状态 + 逐段 pan）
+S_BUS_STRIDE   = 16;   // 每总线的标量参数
+S_SND_STRIDE   = BUS_MAX * 2;   // 每节点的发送量（mid/side × 总线数）
+S_XO_STRIDE    = 32;   // XOVER 每段：LP/HP 系数各5 + 状态16 + 处理参数6
+
+// ---- 内存基址表（全部位于节点内存区之上，互不重叠）----
+S_BUF     = 20000;                                              // 共享延迟池
+S_ST      = S_BUF + BUS_POOL * BUS_MAX;                         // stage 参数/状态
+S_TAP     = S_ST   + BUS_MAX * STAGE_MAX * S_STAGE_STRIDE;      // 抽头表
+S_FDN     = S_TAP  + BUS_MAX * STAGE_MAX * TAP_MAX * S_TAP_STRIDE;
+S_MTX     = S_FDN  + BUS_MAX * STAGE_MAX * FDN_N_MAX * S_FDN_STRIDE;
+S_RESO    = S_MTX  + BUS_MAX * STAGE_MAX * FDN_N_MAX * FDN_N_MAX;
+S_BAND    = S_RESO + BUS_MAX * STAGE_MAX * MODE_MAX * S_MODE_STRIDE;
+S_TMP     = S_BAND + BUS_MAX * STAGE_MAX * BAND_MAX * S_BAND_STRIDE;
+S_MODV    = S_TMP  + BUS_MAX * 64;                              // 调制源当前值（L/R）
+S_BUSP    = S_MODV + BUS_MAX * MOD_MAX * 2;                     // 总线标量
+S_SND     = S_BUSP + BUS_MAX * S_BUS_STRIDE;                    // 节点发送量
+S_BM      = S_SND  + (MAX_NODES + 1) * S_SND_STRIDE;            // 总线 mid 输入（每样本）
+S_BS      = S_BM   + BUS_MAX;                                   // 总线 side 输入
+S_BUSON   = S_BS   + BUS_MAX;                                   // 总线启用位（烘焙用）
+S_BUSIN   = S_BUSON + BUS_MAX;                                  // 总线输入增益
+S_RETM    = S_BUSIN + BUS_MAX;                                  // 总线返回 mid（已含 ×0.5）
+S_RETS    = S_RETM + BUS_MAX;                                   // 总线返回 side
+S_BUSSRC  = S_RETS + BUS_MAX;                                   // 总线输入源（0/1/2/3）
+S_BUSREP  = S_BUSSRC + BUS_MAX;                                 // 总线返回模式（0=叠加 1=替换）
+S_TAPSET  = S_BUSREP + BUS_MAX;                                 // 抽头暂存（TAP_MAX 条）
+S_FDNSET  = S_TAPSET + TAP_MAX * S_TAP_STRIDE;                  // FDN 线暂存
+S_MTXSET  = S_FDNSET + FDN_N_MAX * S_FDN_STRIDE;                // 用户矩阵暂存
+S_BANDSET = S_MTXSET + FDN_N_MAX * FDN_N_MAX;                   // 分频带暂存
+S_MODESET = S_BANDSET + BAND_MAX * S_BAND_STRIDE;               // 模态暂存
+// （顶端 = S_MODESET + MODE_MAX*S_MODE_STRIDE ≈ 3.32e5）
+S_ENVV     = S_MODESET + MODE_MAX * S_MODE_STRIDE;              // 包络输出（L/R 各 1 槽）
+S_CURVE    = S_ENVV + ENV_MAX * 2;                              // TABLE 曲线区（按 stage 静态划分）
+S_CURVESET = S_CURVE + BUS_MAX * STAGE_MAX * CURVE_N;           // 曲线暂存（s_curve 写入）
+S_XO       = S_CURVESET + CURVE_N;                              // XOVER 分频段子表
+S_XOSET    = S_XO + BUS_MAX * STAGE_MAX * XO_BAND_MAX * S_XO_STRIDE;  // 配置暂存
+S_GEO      = S_XOSET + XO_BAND_MAX * S_XO_STRIDE;               // 房间几何（12 槽）
+S_ISMW     = S_GEO + 12;                                        // ISM/模态 候选中枢
+S_TOP      = S_ISMW + ISM_NMAX * 5;                             // 顶端（仅供核对）
+
+// ---- stage 字段 ----
+S_ST_TYPE = 0;  S_ST_BUF = 1;  S_ST_LEN = 2;  S_ST_WP  = 3;
+S_ST_A0   = 4;  // A0..A23 → 4..27   （约定：A1/A4 等子表槽存纯偏移，配 S_表[槽+下标] 用；A9 例外存 S_TMP 绝对地址）
+S_ST_Z1   = 28; // Z1..Z19 → 28..47  （约定：Z0 = S_ST_WP 写指针）
+// 显式展开（EEL2 无符号计算，未赋值的名字会被当作 0 → 误写 type 字段，必须逐个给值）
+S_ST_A1 = 5;  S_ST_A2 = 6;  S_ST_A3 = 7;  S_ST_A4 = 8;  S_ST_A5 = 9;  S_ST_A6 = 10; S_ST_A7 = 11;
+S_ST_A8 = 12; S_ST_A9 = 13; S_ST_A10 = 14; S_ST_A11 = 15; S_ST_A12 = 16; S_ST_A13 = 17; S_ST_A14 = 18;
+S_ST_A15 = 19; S_ST_A16 = 20; S_ST_A17 = 21; S_ST_A18 = 22; S_ST_A19 = 23; S_ST_A20 = 24; S_ST_A21 = 25;
+S_ST_A22 = 26; S_ST_A23 = 27;
+S_ST_Z2 = 29;  S_ST_Z3 = 30;  S_ST_Z4 = 31;  S_ST_Z5 = 32;  S_ST_Z6 = 33;  S_ST_Z7 = 34;  S_ST_Z8 = 35;
+S_ST_Z9 = 36;  S_ST_Z10 = 37; S_ST_Z11 = 38; S_ST_Z12 = 39; S_ST_Z13 = 40; S_ST_Z14 = 41; S_ST_Z15 = 42;
+S_ST_Z16 = 43; S_ST_Z17 = 44; S_ST_Z18 = 45; S_ST_Z19 = 46;
+
+// ---- primitive 类型枚举 ----
+S_T_TAP  = 1;   S_T_LOOP = 2;  S_T_APD = 3;   S_T_MOD = 4;   S_T_FDN = 5;
+S_T_DIFF = 6;   S_T_MSX  = 7;  S_T_BAND = 8;  S_T_DECO = 9;  S_T_ITD = 10;
+S_T_RESO = 11;  S_T_AIR  = 12; S_T_DOP = 13;
+// 声音编辑类：14 = TABLE（任意传输曲线）15 = MUL（乘法器）16 = ENV（包络检波器）
+// 注：MOD 与 ENV 是"生产者"——只在音频链之前统一跑一遍，不进主 dispatch。
+S_T_TABLE = 14; S_T_MUL  = 15; S_T_ENV  = 16; S_T_DOM  = 17;
+// 第二批：18 = BQ（双二阶）19 = XOVER（LR 分频）20 = DYN（动态）
+//            21 = TRANS（瞬态设计）
+S_T_BQ    = 18; S_T_XOVER = 19; S_T_DYN  = 20; S_T_TRANS = 21;
+// 22 = NOISE（噪声源）。ISM / ROOMMODES 是配置期生成器，不占运行期 type。
+S_T_NOISE = 22;
+// 注：S_T_DIFF 在配置期展开为 TAP（velvet noise 抽头表在 s_add_diff 内生成），
+//     运行期类型就是 S_T_TAP——这是有意的：密度反射与多抽头本就是同一件事。
+
+// ---- 总线标量字段 ----
+S_BUS_IN = 0;  S_BUS_RM = 1;  S_BUS_RS = 2;  S_BUS_STAGES = 3;
+S_BUS_NPROD = 4;   // 生产者个数（MOD + ENV）
+S_BUS_SRC = 5;     // 输入源：0=节点发送 1=主路干声 2=主路湿声 3=主路全声
+S_BUS_REP = 6;     // 返回模式：0=叠加（默认）1=替换（主插入）
+
+// ---- 子记录字段 ----
+S_TAP_D = 0; S_TAP_GL = 1; S_TAP_GR = 2; S_TAP_C = 3; S_TAP_M = 4;
+S_TAP_ZAL = 5; S_TAP_ZAR = 6; S_TAP_ZDL = 7; S_TAP_ZDR = 8;
+
+S_FDN_D = 0; S_FDN_INL = 1; S_FDN_INR = 2; S_FDN_OL = 3; S_FDN_OR = 4;
+S_FDN_C = 5; S_FDN_G = 6; S_FDN_Z = 7; S_FDN_BUF = 8; S_FDN_LEN = 9; S_FDN_WP = 10;
+// 每线吸收滤波器：AC = 一阶 LP 系数，AG = 高频增益 g ∈ (0,1]，AZ = LP 状态
+S_FDN_AC = 11; S_FDN_AG = 12; S_FDN_AZ = 13;
+
+S_RSO_P1 = 0; S_RSO_P2 = 1; S_RSO_GL = 2; S_RSO_GR = 3; S_RSO_GN = 4;
+S_RSO_Y1 = 5; S_RSO_Y2 = 6; S_RSO_EX = 7;
+
+S_BD_C = 0; S_BD_W = 1; S_BD_G = 2; S_BD_DC = 3; S_BD_DLY = 4;
+S_BD_BUF = 5; S_BD_LEN = 6; S_BD_WP = 7;
+// 分频斜率 = 1..4 级一阶 LP 级联 → 状态按级展开
+S_BD_ZSL = 8;                       // ZSL[0..BAND_ORD_MAX-1] → 8..11
+S_BD_ZSR = S_BD_ZSL + BAND_ORD_MAX; // ZSR[0..3] → 12..15
+S_BD_ZDL = S_BD_ZSR + BAND_ORD_MAX; // 16
+S_BD_ZDR = S_BD_ZDL + 1.0;          // 17
+S_BD_GL  = S_BD_ZDR + 1.0;          // 18  逐段 pan：L 增益
+S_BD_GR  = S_BD_GL + 1.0;           // 19  逐段 pan：R 增益
+// ---- XOVER 每段字段（stride 32）----
+// 0..4  LP 系数(b0,b1,b2,a1,a2)  5..9  HP 系数
+// 10..13 LP 第0级状态(L1,L2,R1,R2)  14..17 LP 第1级状态
+// 18..21 HP 第0级状态              22..25 HP 第1级状态
+// 26 gain_l  27 gain_r  28 delay  29 buf  30 len  31 wp
+S_XO_LB0 = 0;  S_XO_HB0 = 5;
+S_XO_LS0 = 10; S_XO_LS1 = 14; S_XO_HS0 = 18; S_XO_HS1 = 22;
+S_XO_GL  = 26; S_XO_GR = 27; S_XO_DLY = 28;
+S_XO_BUF = 29; S_XO_LEN = 30; S_XO_WP = 31;
+// ---- 房间几何槽位（S_GEO 基址）----
+G_LX = 0; G_LY = 1; G_LZ = 2;          // 房间尺寸 m
+G_SX = 3; G_SY = 4; G_SZ = 5;          // 声源位置 m
+G_RX = 6; G_RY = 7; G_RZ = 8;          // 听者位置 m
+G_BX = 9; G_BY = 10; G_BZ = 11;        // 各轴反射系数 β ∈ [0,1)
+
+// ---- 运行期全局（采样段可见）----
+S_ALLOC    = 0.0;   // 延迟池分配游标（配置期递增）
+S_OVERFLOW = 0.0;   // 延迟池溢出标志（1 = 曾有分配被截断，需调大 BUS_POOL）
+S_TAPSET_MAXD = 0.0;
+BUS_ANY    = 0.0;   // 0 = 没有任何总线启用 → 采样段不进总线分支
+S_OL = 0.0; S_OR = 0.0; S_OUT_L = 0.0; S_OUT_R = 0.0;
+// 采样段总线调度临时量（默认路径不使用）
+sb_src = 0.0; sb_l = 0.0; sb_r = 0.0;
+
+// ==========================================================================
+// [SECTION 2] Bulletproof Node Config (Control-Rate Pre-calculation)
+// ==========================================================================
+function update_route_flags(idx) local(p) (
+    p = M_P + idx * NODE_STRIDE;
+
+    p[P_FLAG_GRP_SOFT] = (p[P_ODD_FINAL]!=0.0 || p[P_SQ_FINAL]!=0.0 || p[P_TRI_FINAL]!=0.0 || p[P_SAW_FINAL]!=0.0 || p[P_FOLD_FINAL]!=0.0 || p[P_FLEX_FINAL]!=0.0) ? 1.0 : 0.0;
+
+    p[P_FLAG_V1_SOFT10] = (p[P_ODD_FINAL]!=0.0 || p[P_EVEN_FINAL]!=0.0) ? 1.0 : 0.0;
+    p[P_FLAG_V1_SOFT02] = (p[P_HUE_FINAL]!=0.0 || p[P_TONE_FINAL]!=0.0) ? 1.0 : 0.0;
+
+    // 汇总各标记位，判断是否需要计算归一化信号及绝对值
+    p[P_FLAG_GLOBAL_ACTIVE] = (p[P_FLAG_GRP_SOFT]!=0.0 || p[P_FLAG_V1_SOFT10]!=0.0 || p[P_FLAG_V1_SOFT02]!=0.0 || p[P_DYN_MULT]!=0.0 || p[P_SHARP_FINAL]!=0.0 || p[P_COMB_FINAL]!=0.0 || p[P_APF_MIX_ACTIVE]!=0.0) ? 1.0 : 0.0;
+    // 节点级总开关：任一输出来源激活则本节点运行；全部关闭则整节点跳过
+    p[P_FLAG_NODE_ACTIVE] = (p[P_FLAG_GLOBAL_ACTIVE]!=0.0 || p[P_EQ_GAIN_K]!=0.0) ? 1.0 : 0.0;
+);
+
+function update_warp_flags(idx) local(p) (
+    p = M_P + idx * NODE_STRIDE;
+    p[P_FLAG_WARP_ACTIVE] = (p[P_SPREAD_AMT]!=0.0 || p[P_WARP_H_STRETCH]!=0.0 || p[P_WARP_W_WRAP]<99.0 || p[P_FLAG_WARP_FLIP]!=0.0 || p[P_WARP_X_SAW]!=0.0 || p[P_FILTER_MIX]!=0.0 || p[P_FILTER_LP_SLOPE]!=0.0) ? 1.0 : 0.0;
+);
+// 注：W_WRAP ≥ 99 = wrap 关闭哨兵（node_begin 复位态为 100）。已知边界：旧式预设
+// 漏调 set_p_warp 且该节点 Dyn 链启用时，wrap 段会白算（结果仍正确）——为保引擎段
+// 与 1.7.31 逐字节一致，不做处理（性能影响可忽略）。
+
+// 1. EQ 模块区
+// 注：EQ 输入级同时是塑形链的供料路径（v1 恒定输出给谐波组）——EQ 增益为 0 ≠ 节点静音
+function set_p_eq(idx, type, f, g, q) local(p, g_tpt, k_damp, inv_denom, A, w0, cw, sw, sA, alpha, a0, b0, b1, b2, a1, a2) (
+    idx = max(1, min(MAX_NODES, floor(idx)));
+    p = M_P + idx * NODE_STRIDE;
+    type = max(TYPE_LP, min(TYPE_PEAK_BQ, floor(type)));
+    f = max(20.0, min(f, SAFE_SR_LIMIT));
+    p[P_EQ_FREQ_HZ] = f; // 仅记录展示用（引擎不读取；为外部预设读取习惯保留——死存储）
+    q = max(0.1, min(24.0, q));
+    g = max(-120.0, min(24.0, g));
+    q = (type == TYPE_LO_SHELF || type == TYPE_HI_SHELF) ? min(q, 1.0) : q;
+    g_tpt = tan(PI * f * SR_INV);
+    k_damp = 1.0 / q;
+    inv_denom = 1.0 / (1.0 + g_tpt * (g_tpt + k_damp));
+    p[P_EQ_G_TPT] = g_tpt * inv_denom; p[P_EQ_GK] = g_tpt + k_damp; p[P_EQ_K_DAMP] = k_damp; p[P_EQ_G_TAN] = g_tpt;
+    p[P_EQ_TYPE] = type;
+    p[P_EQ_DAMPING] = max(0.0, CONST_DAMPING) * EQ_DAMPING_SCALE; // 负值会使阻尼分母趋零
+    p[P_EQ_V1_C1] = 1.0 - p[P_EQ_G_TPT] * p[P_EQ_GK];
+    p[P_EQ_V1_C2] = 2.0 * p[P_EQ_G_TAN];
+
+    type <= TYPE_PEAK_SVF ? (
+        p[P_EQ_GAIN_K] = (exp(g * LN10_DIV_20) - 1.0) * SAFE_B;
+    ) : (
+        p[P_EQ_GAIN_K] = g != 0.0 ? 1.0 : 0.0;
+        A  = exp(g * LN10_DIV_20 * 0.5);
+        w0 = TWO_PI * f * SR_INV;
+        cw = cos(w0); sw = sin(w0);
+
+        type == TYPE_PEAK_BQ ? (
+            alpha = sw / (2.0 * q);
+            a0 = 1.0 + alpha / A;
+            b0 = (1.0 + alpha * A) / a0;
+            b1 = (-2.0 * cw) / a0;
+            b2 = (1.0 - alpha * A) / a0;
+            a1 = b1;
+            a2 = (1.0 - alpha / A) / a0;
+            // 注：RBJ peaking 系数满足 b1 == a1，故 B1(=b1-a1) 恒为 0，
+            // 处理循环中据此省略了 B1*in 项；若日后修改此公式，须同步检查该省略是否仍成立。
+            p[P_BQ_TYPE_5] = 1.0;
+        ) : type == TYPE_LO_SHELF ? (
+            sA = sqrt(A);
+            alpha = (sw * 0.5) * sqrt(max(0.0, (A + 1.0/A)*(1.0/q - 1.0) + 2.0));
+            a0 = (A + 1.0) + (A - 1.0)*cw + 2.0*sA*alpha;
+            b0 = A*((A + 1.0) - (A - 1.0)*cw + 2.0*sA*alpha) / a0;
+            b1 = 2.0*A*((A - 1.0) - (A + 1.0)*cw) / a0;
+            b2 = A*((A + 1.0) - (A - 1.0)*cw - 2.0*sA*alpha) / a0;
+            a1 = -2.0*((A - 1.0) + (A + 1.0)*cw) / a0;
+            a2 = ((A + 1.0) + (A - 1.0)*cw - 2.0*sA*alpha) / a0;
+            p[P_BQ_TYPE_5] = 0.0;
+        ) : (
+            sA = sqrt(A);
+            alpha = (sw * 0.5) * sqrt(max(0.0, (A + 1.0/A)*(1.0/q - 1.0) + 2.0));
+            a0 = (A + 1.0) - (A - 1.0)*cw + 2.0*sA*alpha;
+            b0 = A*((A + 1.0) + (A - 1.0)*cw + 2.0*sA*alpha) / a0;
+            b1 = -2.0*A*((A - 1.0) + (A + 1.0)*cw) / a0;
+            b2 = A*((A + 1.0) + (A - 1.0)*cw - 2.0*sA*alpha) / a0;
+            a1 = 2.0*((A - 1.0) - (A + 1.0)*cw) / a0;
+            a2 = ((A + 1.0) - (A - 1.0)*cw - 2.0*sA*alpha) / a0;
+            p[P_BQ_TYPE_5] = 0.0;
+        );
+
+        p[P_BQ_B0] = b0 - 1.0;
+        p[P_BQ_B1] = b1 - a1;
+        p[P_BQ_B2] = b2 - a2;
+        p[P_BQ_A1] = a1;
+        p[P_BQ_A2] = a2;
+    );
+    p[P_FLAG_EQ_ACTIVE] = (p[P_EQ_GAIN_K] != 0.0 && (type == TYPE_LP || type == TYPE_HP)) ? 1.0 : 0.0;
+    p[P_FLAG_NODE_ACTIVE] = (p[P_FLAG_GLOBAL_ACTIVE]!=0.0 || p[P_EQ_GAIN_K]!=0.0) ? 1.0 : 0.0;
+);
+
+function set_p_ms(idx, m_w, s_w) local(p) (
+    idx = max(1, min(MAX_NODES, floor(idx)));
+    p = M_P + idx * NODE_STRIDE;
+    p[P_MS_MID_W] = max(0.0, min(MS_W_MAX, m_w));
+    p[P_MS_SIDE_W] = max(0.0, min(MS_W_MAX, s_w));
+);
+
+function set_p_comb(idx, comb_base, comb_dry_mult, comb_wet_mult, comb_mix) local(p) (
+    idx = max(1, min(MAX_NODES, floor(idx)));
+    p = M_P + idx * NODE_STRIDE;
+    p[P_COMB_BASE] = comb_base * COMB_BASE_SCALE * SAFE_B;
+    p[P_COMB_FINAL] = comb_base != 0.0 ? comb_dry_mult * comb_wet_mult * comb_mix : 0.0;
+    update_route_flags(idx);
+);
+
+function set_p_even(idx, even_base, even_dry_mult, even_wet_mult, even_mix) local(p) (
+    idx = max(1, min(MAX_NODES, floor(idx)));
+    p = M_P + idx * NODE_STRIDE;
+    p[P_EVEN_BASE] = (even_base + CONST_HUE_GLOBAL) * HUE_EVEN_BASE_SCALE;
+    p[P_EVEN_MULT] = even_dry_mult * even_wet_mult * even_mix;
+    p[P_EVEN_FINAL] = p[P_EVEN_BASE] * p[P_EVEN_MULT];
+    update_route_flags(idx);
+);
+
+// ⚠ 语义澄清：APF 处理的是本节点 out_sum（其它模块的累加结果），不是输入信号。
+//   只写 node_begin + set_p_apf + node_end 的节点，out_sum 在进入 APF 前恒为 0.0，
+//   全通滤波 0 仍为 0 —— 该节点会被判定为 active 并进表，但输出恒为 -DENORM_NOISE（听感静音）。
+//   APF 是"相位染色器"，必须与至少一个塑形/EQ 模块搭配才有声音。
+function set_p_apf(idx, mix, freq, order, q, stages, fb_ff, polarity) local(p, w0, alpha, a0, tan_w) (
+    idx = max(1, min(MAX_NODES, floor(idx)));
+    p = M_P + idx * NODE_STRIDE;
+    freq = max(20.0, min(freq, SAFE_SR_LIMIT));
+    p[P_APF_STAGES] = max(APF_STAGES_MIN, min(APF_STAGES_MAX, floor(stages)));
+    p[P_APF_ORDER2] = order > 1.5 ? 1.0 : 0.0;
+    p[P_APF_ORDER2] != 0.0 ? (
+        w0 = TWO_PI * freq * SR_INV;
+        alpha = sin(w0) / (2.0 * max(0.1, q));
+        a0 = 1.0 + alpha;
+        p[P_APF_A1] = -2.0 * cos(w0) / a0;
+        p[P_APF_A2] = (1.0 - alpha) / a0;
+    ) : (
+        tan_w = tan(PI * freq * SR_INV);
+        p[P_APF_A1] = (tan_w - 1.0) / (tan_w + 1.0);
+        p[P_APF_A2] = 0.0;
+    );
+    fb_ff = max(-APF_FB_MAX, min(APF_FB_MAX, fb_ff));
+    mix = max(0.0, min(1.9, mix));
+    p[P_APF_FB_FF_POS] = fb_ff > 0.0 ? fb_ff : 0.0;
+    p[P_APF_FB_FF_NEG] = fb_ff < 0.0 ? -fb_ff : 0.0;
+    p[P_APF_MIX_POL] = mix * (polarity < 0.0 ? -1.0 : 1.0);
+    p[P_APF_INV_MIX] = 1.0 - mix;
+    p[P_APF_MIX_ACTIVE] = mix != 0.0 ? 1.0 : 0.0;
+    update_route_flags(idx);
+);
+
+function set_p_odd(idx, odd_base, dry_mult, wet_mult, mix) local(p) (
+    idx = max(1, min(MAX_NODES, floor(idx)));
+    p = M_P + idx * NODE_STRIDE;
+    p[P_ODD_BASE] = odd_base;
+    p[P_ODD_MULT] = dry_mult * wet_mult * mix;
+    p[P_ODD_FINAL] = p[P_ODD_BASE] * p[P_ODD_MULT];
+    update_route_flags(idx);
+);
+
+function set_p_sharp(idx, sharp_base, sharp_dry_mult, sharp_wet_mult, sharp_mix) local(p) (
+    idx = max(1, min(MAX_NODES, floor(idx)));
+    p = M_P + idx * NODE_STRIDE;
+    p[P_SHARP_BASE] = sharp_base * SHARP_BASE_SCALE;
+    p[P_SHARP_MULT] = sharp_dry_mult * sharp_wet_mult * sharp_mix;
+    p[P_SHARP_FINAL] = p[P_SHARP_BASE] * p[P_SHARP_MULT];
+    update_route_flags(idx);
+);
+
+function set_p_hue(idx, hue_base, hue_dry_mult, hue_wet_mult, hue_mix) local(p) (
+    idx = max(1, min(MAX_NODES, floor(idx)));
+    p = M_P + idx * NODE_STRIDE;
+    p[P_HUE_BASE] = (hue_base + CONST_HUE_GLOBAL) * HUE_EVEN_BASE_SCALE;
+    p[P_HUE_MULT] = hue_dry_mult * hue_wet_mult * hue_mix;
+    p[P_HUE_FINAL] = p[P_HUE_BASE] * p[P_HUE_MULT];
+    update_route_flags(idx);
+);
+
+function set_p_sq(idx, sq_base, dry_mult, wet_mult, mix) local(p) (
+    idx = max(1, min(MAX_NODES, floor(idx)));
+    p = M_P + idx * NODE_STRIDE;
+    p[P_SQ_BASE] = sq_base;
+    p[P_SQ_MULT] = dry_mult * wet_mult * mix;
+    p[P_SQ_FINAL] = p[P_SQ_BASE] * p[P_SQ_MULT];
+    update_route_flags(idx);
+);
+
+function set_p_tri(idx, tri_base, dry_mult, wet_mult, mix) local(p) (
+    idx = max(1, min(MAX_NODES, floor(idx)));
+    p = M_P + idx * NODE_STRIDE;
+    p[P_TRI_BASE] = tri_base;
+    p[P_TRI_MULT] = dry_mult * wet_mult * mix;
+    p[P_TRI_FINAL] = p[P_TRI_BASE] * p[P_TRI_MULT];
+    update_route_flags(idx);
+);
+
+function set_p_saw(idx, saw_base, dry_mult, wet_mult, mix) local(p) (
+    idx = max(1, min(MAX_NODES, floor(idx)));
+    p = M_P + idx * NODE_STRIDE;
+    p[P_SAW_BASE] = saw_base;
+    p[P_SAW_MULT] = dry_mult * wet_mult * mix;
+    p[P_SAW_FINAL] = p[P_SAW_BASE] * p[P_SAW_MULT];
+    update_route_flags(idx);
+);
+
+function set_p_fold(idx, fold_base, dry_mult, wet_mult, mix) local(p) (
+    idx = max(1, min(MAX_NODES, floor(idx)));
+    p = M_P + idx * NODE_STRIDE;
+    p[P_FOLD_BASE] = fold_base;
+    p[P_FOLD_MULT] = dry_mult * wet_mult * mix;
+    p[P_FOLD_FINAL] = p[P_FOLD_BASE] * p[P_FOLD_MULT];
+    update_route_flags(idx);
+);
+
+function set_p_tone(idx, tone_base, tone_dry_mult, tone_wet_mult, tone_mix, tone_freq) local(p) (
+    idx = max(1, min(MAX_NODES, floor(idx)));
+    p = M_P + idx * NODE_STRIDE;
+    tone_freq = max(20.0, min(tone_freq, SAFE_SR_LIMIT));
+    p[P_TONE_FREQ_COEFF] = 1.0 - exp(-TWO_PI * tone_freq * SR_INV);
+    p[P_TONE_BASE] = tone_base;
+    p[P_TONE_MULT] = tone_dry_mult * tone_wet_mult * tone_mix;
+    p[P_TONE_FINAL] = p[P_TONE_BASE] * p[P_TONE_MULT];
+    update_route_flags(idx);
+);
+
+function set_p_dyn(idx, den_base, den_speed, den_wet_mult, den_mix) local(p) (
+    idx = max(1, min(MAX_NODES, floor(idx)));
+    p = M_P + idx * NODE_STRIDE;
+    p[P_DYN_SPEED] = max(0.001, min(0.99, den_speed));
+    p[P_DYN_MULT] = den_base * den_wet_mult * den_mix;
+    update_route_flags(idx);
+);
+
+function set_p_spread(idx, s_amt, s_color) local(p) (
+    idx = max(1, min(MAX_NODES, floor(idx)));
+    p = M_P + idx * NODE_STRIDE;
+    // s_amt 钳到 ±SPREAD_AMT_MAX：spread 是全引擎唯一带样本间正反馈的环节（环增益 = SPREAD_AMT），
+    // > 1 即自激、被 max/min(±2) 钳制钉死在边界做硬削波；钳到 ±0.95 保环增益恒 < 1。
+    s_color = max(-SPREAD_COLOR_MAX, min(SPREAD_COLOR_MAX, s_color)); // 防 exp 中间量溢出
+    p[P_SPREAD_AMT] = max(-SPREAD_AMT_MAX, min(SPREAD_AMT_MAX, s_amt * SPREAD_AMT_SCALE));
+    p[P_SPREAD_COLOR] = 1.0 - exp(-TWO_PI * (20000.0 * exp(s_color * SPREAD_LOG_K)) * SR_INV);
+    update_warp_flags(idx);
+);
+
+function set_p_warp(idx, h_stretch, w_wrap, h_flip, x_saw) local(p) (
+    idx = max(1, min(MAX_NODES, floor(idx)));
+    p = M_P + idx * NODE_STRIDE;
+    p[P_WARP_H_STRETCH] = max(-WARP_STRETCH_MAX, min(WARP_STRETCH_MAX, h_stretch)) * WARP_STRETCH_SCALE;
+    p[P_WARP_W_WRAP] = abs(w_wrap) > 0.001 ? max(WARP_WRAP_MIN, WARP_WRAP_MAX - abs(w_wrap) * WARP_WRAP_AMT) : 100.0;
+    p[P_WARP_INV_WRAP] = p[P_WARP_W_WRAP] < 99.0 ? 1.0 / p[P_WARP_W_WRAP] : 0.0;
+    p[P_WARP_H_FLIP_SIGN] = 1.0 - 2.0 * min(1.0, max(0.0, abs(h_flip))); // 连续极性混合（1-2|c|）：h_flip=0.5 → 系数 0 → sat 静音（有意语义，非 bug）
+    p[P_WARP_X_SAW] = x_saw * WARP_XSAW_SCALE;
+    p[P_FLAG_WARP_FLIP] = h_flip != 0.0 ? 1.0 : 0.0;
+    update_warp_flags(idx);
+);
+
+function set_p_filter_mix(idx, w_mix, w_freq, w_res) local(p, w_tan) (
+    idx = max(1, min(MAX_NODES, floor(idx)));
+    p = M_P + idx * NODE_STRIDE;
+    w_mix = max(0.0, min(1.9, w_mix));
+    w_res = max(-0.99, min(0.99, w_res));
+    p[P_FILTER_MIX_TAN] = 0.0;
+    w_mix != 0.0 ? (
+        w_freq = max(20.0, min(w_freq, SAFE_SR_LIMIT));
+        w_tan = tan(PI * w_freq * SR_INV);
+        p[P_FILTER_MIX_TAN] = (w_tan - w_res) / (w_tan + 1.0);
+    );
+    p[P_FILTER_MIX] = w_mix;
+    update_warp_flags(idx);
+);
+
+function set_p_filter_lp(idx, l_freq, l_slope, l_res) local(p) (
+    idx = max(1, min(MAX_NODES, floor(idx)));
+    p = M_P + idx * NODE_STRIDE;
+    l_freq  = max(20.0, min(l_freq, SAFE_SR_LIMIT));
+    l_slope = max(0.0, min(1.9, l_slope));
+    // res 上限 FILTER_RES_MAX = 0.70：一阶平滑的稳态低频增益恒为 1/(1-res)，
+    // 0.95 时低频 +26 dB（配 slope=1.9 实测 +31.4 dB），DC-blocker 只挡 38 Hz 以下。
+    l_res   = max(0.0, min(FILTER_RES_MAX, l_res));
+    p[P_FILTER_LP_FREQ] = 1.0 - exp(-TWO_PI * l_freq * SR_INV);
+    p[P_FILTER_LP_SLOPE] = l_slope; p[P_FILTER_LP_RES] = l_res;
+    update_warp_flags(idx);
+);
+
+function set_p_flex_index(idx, denom, level_scale, ax_coef) local(p) (
+    idx = max(1, min(MAX_NODES, floor(idx)));
+    p = M_P + idx * NODE_STRIDE;
+    denom = max(0.05, denom);
+    ax_coef = max(0.0, ax_coef);
+    p[P_FLEX_DENOM] = denom;
+    p[P_FLEX_AX_COEF] = ax_coef;
+    p[P_FLEX_LEVEL_COMP] = level_scale == 0.0 ? denom : level_scale;
+);
+
+function set_p_flex(idx, flex_base, dry_mult, wet_mult, mix) local(p) (
+    idx = max(1, min(MAX_NODES, floor(idx)));
+    p = M_P + idx * NODE_STRIDE;
+    p[P_FLEX_DENOM] == 0.0 ? ( p[P_FLEX_DENOM] = 1.0; p[P_FLEX_LEVEL_COMP] = 1.0; p[P_FLEX_AX_COEF] = 1.0; ) : 0; // 双保险：仅旧式预设路径可能触发
+    p[P_FLEX_BASE] = flex_base;
+    p[P_FLEX_MULT] = dry_mult * wet_mult * mix;
+    p[P_FLEX_FINAL] = p[P_FLEX_BASE] * p[P_FLEX_MULT];
+    update_route_flags(idx);
+);
+
+// ==========================================================================
+// [Freedom 稀疏配置 API] 节点工厂复位 / 收尾
+// ==========================================================================
+// node_begin：必须是对该节点的第一个调用。将该节点参数块与全部状态数组清零（工厂复位），
+//             预置惰性哨兵（warp 关闭态），设默认输入级（1kHz / Q0.707 / 0dB），
+//             并写入 M/S 权重。此后未调用的 setter = 模块关闭（不耗算力）。
+// node_end：  对该节点的最后一个调用。统一刷新路由 / 空间标记位（保险步骤，
+//             各 setter 自身也会刷新；显式收尾可读性更好）。
+// 节点号越界时钳制到 [1, MAX_NODES]。
+// 全部 setter（含 node_begin/node_end）设计为初始化段调用：LiveProg 无滑条/块段，
+// 运行时改配置 = 整文件重载 → 重跑初始化段。
+function node_begin(idx, m_w, s_w) local(p, st_m, st_s, sat_m, sat_s, apf_m, apf_s, k) (
+    idx = max(1, min(MAX_NODES, floor(idx)));
+    p = M_P + idx * NODE_STRIDE;
+    k = 0;
+    loop(NODE_STRIDE, p[k] = 0.0; k += 1; );
+
+    // 惰性哨兵：set_p_warp 的"关闭"默认态（清零后需显式恢复的字段）
+    p[P_WARP_W_WRAP]      = 100.0;  // ≥99 = wrap 关闭（update_warp_flags 的判据）
+    p[P_WARP_H_FLIP_SIGN] = 1.0;    // 恒等符号（flip 关闭时）
+
+    // Flex 分母默认值：工厂复位即就绪；set_p_flex 内的 0 值兜底仍保留，供不调用 node_begin 的旧式预设
+    p[P_FLEX_DENOM]      = 1.0;
+    p[P_FLEX_LEVEL_COMP] = 1.0;
+    p[P_FLEX_AX_COEF]    = 1.0;
+
+    // 状态数组工厂复位（st / sat / apf 的 mid 与 side 通道）
+    st_m  = M_S_MID  + idx * NODE_STRIDE;  st_s  = M_S_SIDE + idx * NODE_STRIDE;
+    sat_m = M_SAT    + idx * NODE_STRIDE;  sat_s = sat_m + CH_OFFSET;
+    apf_m = M_APF    + idx * NODE_STRIDE;  apf_s = apf_m + CH_OFFSET;
+    k = 0; loop(ST_SLOTS,  st_m[k]  = 0.0; st_s[k]  = 0.0; k += 1; );
+    // 该节点的空间总线发送量一并工厂复位（未设发送 = 不进总线）
+    k = 0; loop(S_SND_STRIDE, S_SND[idx * S_SND_STRIDE + k] = 0.0; k += 1; );
+    k = 0; loop(SAT_SLOTS, sat_m[k] = 0.0; sat_s[k] = 0.0; k += 1; );
+    k = 0; loop(APF_SLOTS, apf_m[k] = 0.0; apf_s[k] = 0.0; k += 1; );
+
+    // 默认输入级：峰值型 SVF 调音 1kHz / Q0.707，增益 0（不提升，仅塑形供料）
+    // 显式调用过 set_p_eq 的节点会覆盖此默认值
+    // ⚠ 语义澄清：塑形链（odd/even/sq/tri/saw/fold/flex/hue/tone/sharp/comb/dyn）的供料
+    //   恒为 SVF 的带通输出 v1，与 TYPE_* 无关，且 SVF 没有旁路态（Q 下限 0.1 只是"很宽很弱"）。
+    //   所以 node_begin + 只开 set_p_odd 的真实语义是「1kHz/Q0.707 带通供料的奇次谐波」，
+    //   而不是直觉上的「只开奇次谐波」。需要中性供料请改用较高/较低 f 配合低 Q 逼近。
+    set_p_eq(idx, TYPE_PEAK_SVF, 1000.0, 0.0, 0.707);
+
+    // M/S 权重（稀疏风格在节点开头给定权重，未设权重即静音的旧坑由此消除）
+    set_p_ms(idx, m_w, s_w);
+);
+
+function node_end(idx) (
+    idx = max(1, min(MAX_NODES, floor(idx)));
+    update_route_flags(idx);
+    update_warp_flags(idx);
+);
+
+// 节点 → 总线的发送量。必须定义在节点预设区之前（EEL2 函数须先定义后调用）。
+// 书写规则：写在 node_begin 之后（node_begin 会工厂复位发送量）、rebuild_active_list 之前；
+// 同一 (节点, 总线) 可重复调用覆盖。发送取的是"节点自身输出"，而该输出已被
+// 节点自己的 SVF 供料带限 —— 这就是分频段独立空间处理（3kHz 供料的房间 /
+// 100Hz 供料的箱体）免费得到的由来。
+function set_p_send(idx, bus, m_amt, s_amt) local(bi) (
+  idx = max(1.0, min(MAX_NODES, floor(idx)));
+  bi  = max(0.0, min(BUS_MAX - 1.0, floor(bus)));
+  S_SND[idx * S_SND_STRIDE + bi * 2.0]     = m_amt;
+  S_SND[idx * S_SND_STRIDE + bi * 2.0 + 1.0] = s_amt;
+);
+
+// [Freedom 稀疏配置 API] 活动节点表重建 + 三表分流
+// 1) M_ACTIVE：完整活动表（保留供调试/外部读取，ACTIVE_COUNT 计数）
+// 2) M_DUAL / M_MID / M_SIDE：按通道类别拆分的三张表，采样段按表直跑、循环体内零分支
+// 过滤条件：P_FLAG_NODE_ACTIVE 且至少一个通道权重非零（node_begin(n, 0, 0) 配一堆模块的节点不进表，免得每样本空转）。
+// 由初始化段末尾统一调用——任何 node_begin/set_p_* 都必须写在该调用之前，
+// 否则该节点不会进入采样段处理列表（静默失效）。
+function rebuild_active_list() local(i, pp, mw, sw, bj, sndb) (
+    ACTIVE_COUNT = 0; DUAL_COUNT = 0; MID_COUNT = 0; SIDE_COUNT = 0;
+    i = 1;
+    loop(MAX_NODES,
+        pp = M_P + i * NODE_STRIDE;
+        mw = pp[P_MS_MID_W]; sw = pp[P_MS_SIDE_W];
+        (pp[P_FLAG_NODE_ACTIVE] != 0.0 && (mw != 0.0 || sw != 0.0)) ? (
+            M_ACTIVE[ACTIVE_COUNT] = i * NODE_STRIDE;
+            ACTIVE_COUNT += 1;
+            (mw != 0.0 && sw != 0.0) ? (
+                M_DUAL[DUAL_COUNT]     = i * NODE_STRIDE;
+                M_DUAL_WM[DUAL_COUNT]  = mw;
+                M_DUAL_WS[DUAL_COUNT]  = sw;
+                M_DUAL_STM[DUAL_COUNT] = M_S_MID  + i * NODE_STRIDE;
+                M_DUAL_STS[DUAL_COUNT] = M_S_SIDE + i * NODE_STRIDE;
+                M_DUAL_SAT[DUAL_COUNT] = M_SAT    + i * NODE_STRIDE;
+                M_DUAL_APF[DUAL_COUNT] = M_APF    + i * NODE_STRIDE;
+                sndb = i * S_SND_STRIDE; bj = 0;
+                loop(BUS_MAX,
+                    M_DUAL_SMM[DUAL_COUNT * BUS_MAX + bj] = S_SND[sndb + bj * 2.0];
+                    M_DUAL_SMS[DUAL_COUNT * BUS_MAX + bj] = S_SND[sndb + bj * 2.0 + 1.0];
+                    bj += 1;
+                );
+                DUAL_COUNT += 1;
+            ) : mw != 0.0 ? (
+                M_MID[MID_COUNT]     = i * NODE_STRIDE;
+                M_MID_W[MID_COUNT]   = mw;
+                M_MID_ST[MID_COUNT]  = M_S_MID + i * NODE_STRIDE;
+                M_MID_SAT[MID_COUNT] = M_SAT   + i * NODE_STRIDE;
+                M_MID_APF[MID_COUNT] = M_APF   + i * NODE_STRIDE;
+                sndb = i * S_SND_STRIDE; bj = 0;
+                loop(BUS_MAX,
+                    M_MID_SM[MID_COUNT * BUS_MAX + bj] = S_SND[sndb + bj * 2.0];
+                    bj += 1;
+                );
+                MID_COUNT += 1;
+            ) : (
+                M_SIDE[SIDE_COUNT]     = i * NODE_STRIDE;
+                M_SIDE_W[SIDE_COUNT]   = sw;
+                M_SIDE_ST[SIDE_COUNT]  = M_S_SIDE + i * NODE_STRIDE; // 注意：M_S_SIDE 本身已含 CH_OFFSET 偏移，不可再加
+                M_SIDE_SAT[SIDE_COUNT] = M_SAT    + i * NODE_STRIDE + CH_OFFSET;
+                M_SIDE_APF[SIDE_COUNT] = M_APF    + i * NODE_STRIDE + CH_OFFSET;
+                sndb = i * S_SND_STRIDE; bj = 0;
+                loop(BUS_MAX,
+                    M_SIDE_SS[SIDE_COUNT * BUS_MAX + bj] = S_SND[sndb + bj * 2.0 + 1.0];
+                    bj += 1;
+                );
+                SIDE_COUNT += 1;
+            );
+        );
+        i += 1;
+    );
+);
+
+// ==========================================================================
+// [SECTION 3] Presets — Freedom 自由节点配置区
+// ==========================================================================
+// 稀疏风格（推荐）：
+//   node_begin(节点号, mid权重, side权重);      // 必须是该节点第一个调用：工厂复位 + 默认输入级 + 权重
+//       set_p_eq(节点号, 类型, 频率, 增益dB, Q); // 输入级调音（不写则默认 1kHz/Q0.707/0dB）
+//       set_p_odd / set_p_even / set_p_saw / set_p_comb / set_p_sharp / ... (节点号, base, dry, wet, mix)
+//       set_p_dyn / set_p_spread / set_p_warp / set_p_filter_mix / set_p_filter_lp ...
+//   node_end(节点号);                            // 收尾刷新标记位
+//
+// 规则：
+//   * 节点号 1..MAX_NODES(10)，可跳号留空；sample 段循环上限由下方自动探测得出
+//   * 只写要启用的模块：未调用的 setter = 关闭（flag 门控，不耗算力）
+//   * mid权重或side权重为 0 的节点自动走单通道引擎（算力减半）
+//   * 1.7.31 旧式预设可直接粘贴（不用 node_begin/node_end，权重用 set_p_ms 给）
+//
+// ==========================================================================
+// [Warm Body v1] 默认调音 —— 4 个节点，纯 EQ + 偶次谐波，不开空间总线
+// ==========================================================================
+// 旋钮：乘在 dB 上的系数（1.0 = 默认；0 = 关闭该段；可超过 1，如 1.3 = 加重 30%）。
+PRE_BASS = 1.0;   // 低频厚度：75Hz 钟形
+PRE_BODY = 1.0;   // 低中频体量：250Hz 低架
+PRE_MID  = 1.0;   // 中高收敛：3.3kHz 钟形（去纸感主刀）
+PRE_TOP  = 1.0;   // 高频去毛刺：6.3kHz 钟形
+
+// ---- Node 1：75Hz 钟形 +1.8dB + 纯偶次谐波（mid-only：低音居中，单通道引擎）----
+//      SVF 钟形（并联带通）：增益值即中心频率处的实际增益，两侧平滑回落，无环铃。
+//      偶次强度 = base×mix = 0.42：75Hz / −6dBFS 时 H2 = −23.0dB（实测）；想更厚调 mix（0.55 → −20.7dB，实测）。
+node_begin(1, 1.0, 0.0);
+set_p_eq(1, TYPE_PEAK_SVF, 75, 1.8 * PRE_BASS, 1.1);
+set_p_even(1, 1.0, 1.0, 1.0, 0.42);
+node_end(1);
+
+// ---- Node 2：250Hz 低架 +1.0dB —— 低中频体量（mid-only）----
+//      用 SVF 低通型作"低架"（TYPE_LP + 非零增益 = 原信号 + 增益×低通），比 Biquad 低架
+//      便宜约 20%。Q0.6 让过渡平缓；SVF 低架在拐点上方有约 −0.2dB 的浅凹陷（Q 越大越明显，
+//      Q1.0 约 −0.35dB），量级可忽略。
+node_begin(2, 1.0, 0.0);
+set_p_eq(2, TYPE_LP, 250, 1.0 * PRE_BODY, 0.6);
+node_end(2);
+
+// ---- Node 3：3.3kHz 钟形 −2.0dB —— 去纸感主刀（dual，side 权重 1.25）----
+//      Q0.8 宽而缓：钟形自身 −1dB 以内的范围约 2.0~5.5kHz（实测），不做窄陷波
+//      （窄陷波 = 空洞感，久听反而累）。
+node_begin(3, 1.0, 1.25);
+set_p_eq(3, TYPE_PEAK_SVF, 3300, -2.0 * PRE_MID, 0.8);
+node_end(3);
+
+// ---- Node 4：6.3kHz 钟形 −1.2dB —— 去毛刺 / 齿音边缘（dual，side 权重 1.25）----
+//      刻意用钟形而不用高架：10kHz 以上保持原样，空气感不丢。
+node_begin(4, 1.0, 1.25);
+set_p_eq(4, TYPE_PEAK_SVF, 6300, -1.2 * PRE_TOP, 1.0);
+node_end(4);
+
+// ---- Freedom 用法示例（默认注释关闭：默认音色 = 上方 Warm Body 调音）----
+// 示例 A：只开 3 个模块（even + odd + saw），9100Hz 高架 +2dB / Q0.9
+// node_begin(5, 1.0, 1.0);
+// set_p_eq(5, TYPE_HI_SHELF, 9100, 2.0, 0.9);
+// set_p_even(5, 1.0, 1.0, 1.0, 1.0);
+// set_p_odd(5, 1.0, 1.0, 1.0, 1.0);
+// set_p_saw(5, 0.3, 1.0, 1.0, 1.0);
+// node_end(5);
+//
+// 示例 B：mid-only 节点（side 权重 0 → 单通道路径，算力减半）+ Dyn/Spread/Filter 链
+// node_begin(6, 1.0, 0.0);
+// set_p_eq(6, TYPE_PEAK_SVF, 2500, 0.0, 0.707);
+// set_p_dyn(6, 0.35, 0.4, 1.0, 1.0);        // dyn 链是 spread/warp/filter 的载体
+// set_p_spread(6, 0.15, 0.6);
+// set_p_filter_lp(6, 9000, 0.35, 0.2);
+// node_end(6);
+//
+// 示例 C：side-only 节点（仅处理侧声道）
+// node_begin(7, 0.0, 1.0);
+// set_p_eq(7, TYPE_PEAK_SVF, 700, 0.0, 0.707);
+// set_p_odd(7, 0.25, 1.0, 1.0, 1.0);
+// node_end(7);
+
+// ==========================================================================
+// 活动节点压缩列表：一次性收集所有活动节点的 i_stride，
+// sample 段直接按此列表逐个处理，不再逐节点判断 flag、不再遍历任何空号（含中段跳号）。
+// M_ACTIVE 放在所有节点内存区之后，预留 MAX_NODES 个字长，足够存下最坏情况（全部节点激活）。
+// ==========================================================================
+M_ACTIVE = M_APF + (MAX_NODES + 1) * NODE_STRIDE + CH_OFFSET;
+
+// 三表分流基址：紧跟 M_ACTIVE（已预留 MAX_NODES 槽）之后，各再预留 MAX_NODES 槽
+M_DUAL      = M_ACTIVE   + MAX_NODES;   // 双通道节点：i_stride
+M_DUAL_WM   = M_DUAL     + MAX_NODES;   // mid 权重
+M_DUAL_WS   = M_DUAL_WM  + MAX_NODES;   // side 权重
+M_DUAL_STM  = M_DUAL_WS  + MAX_NODES;   // st mid 基址
+M_DUAL_STS  = M_DUAL_STM + MAX_NODES;   // st side 基址
+M_DUAL_SAT  = M_DUAL_STS + MAX_NODES;   // sat_st mid 基址（side = +CH_OFFSET）
+M_DUAL_APF  = M_DUAL_SAT + MAX_NODES;   // apf_st mid 基址（side = +CH_OFFSET）
+M_MID       = M_DUAL_APF + MAX_NODES;   // mid-only 节点：i_stride
+M_MID_W     = M_MID      + MAX_NODES;
+M_MID_ST    = M_MID_W    + MAX_NODES;
+M_MID_SAT   = M_MID_ST   + MAX_NODES;
+M_MID_APF   = M_MID_SAT  + MAX_NODES;
+M_SIDE      = M_MID_APF  + MAX_NODES;   // side-only 节点：i_stride
+M_SIDE_W    = M_SIDE     + MAX_NODES;
+M_SIDE_ST   = M_SIDE_W   + MAX_NODES;   // 已含 CH_OFFSET
+M_SIDE_SAT  = M_SIDE_ST  + MAX_NODES;   // 已含 CH_OFFSET
+M_SIDE_APF  = M_SIDE_SAT + MAX_NODES;   // 顶端 = M_ACTIVE + 17*MAX_NODES，远低于 EEL2 内存上限
+
+// 空间总线发送权重表（按"节点 × 总线"展平，采样段循环体内零分支）
+M_DUAL_SMM = M_SIDE_APF + MAX_NODES;                 // dual 节点 → 总线 mid 发送
+M_DUAL_SMS = M_DUAL_SMM + MAX_NODES * BUS_MAX;       // dual 节点 → 总线 side 发送
+M_MID_SM   = M_DUAL_SMS + MAX_NODES * BUS_MAX;       // mid-only 节点 → 总线 mid 发送
+M_SIDE_SS  = M_MID_SM   + MAX_NODES * BUS_MAX;       // side-only 节点 → 总线 side 发送
+// 顶端 = M_ACTIVE + (17 + 6*BUS_MAX) * MAX_NODES，仍远低于 S_BUF = 20000
+
+// 相位级状态显式清零：不再依赖宿主对未初始化槽的清零行为
+M_AP[0] = 0.0; M_AP[1] = 0.0;
+
+// ⚠⚠⚠ 初始化收尾线：任何 node_begin / set_p_* / set_p_ms 都必须写在本行之前 ⚠⚠⚠
+// 写在下面的节点配置不会进入采样段处理列表（参数写进去了，但静默失效）。
+rebuild_active_list();
+// 发送量检测：S_SND 全零（无 set_p_send）时采样段整段跳过 send 累加。
+//   阈值 0.00001 与 EEL2 '!=' 的 1e-5 容差语义对齐；清零循环不受影响（src=0 时
+//   S_BM 恒 0），仅三处累加块被跳过（累加项 = sb_d_m*0.0 = +0.0）。
+BUS_NEED_SEND = 0.0;
+sb_k = 0.0;
+loop((MAX_NODES + 1) * S_SND_STRIDE,
+    abs(S_SND[sb_k]) > 0.00001 ? BUS_NEED_SEND = 1.0;
+    sb_k += 1.0;
+);
+
+
+// ==========================================================================
+// [SECTION 3.5] SPATIAL BUS — 空间与声学调制总线
+// ==========================================================================
+// 设计立场：积木，不是预设。
+//   * 每个 primitive 只做一件事，参数全部暴露 raw 值（ms / Hz / 线性增益 / 弧度），
+//     不做"好听默认"封装；只保留数值稳定性硬钳制（环增益 < 1、读头 ∈ [1, len-2]）。
+//   * 同一 primitive 可多次实例化、任意排序 —— 信号流 = 书写顺序。
+//   * 入手成本不重要，上限与组合自由度才重要：这里没有"房间尺寸"旋钮，
+//     只有 TAP / LOOP / FDN / DECO / ... ；房间由你搭出来。
+//
+// 三条通用约定：
+//   1) 所有"时间"参数在配置期按 srate 换算成样本；缓冲按 S_SR_ALLOC 分配（含余量）。
+//   2) 运行期读头一律 clamp 到 [1, len-2] —— 切采样率不重跑初始化也不会越界。
+//   3) 所有反馈环内注入 DENORM_NOISE —— 否则长尾衰减进 denormal 会吃掉 CPU。
+// ==========================================================================
+
+// ---------------------------------------------------------------- 基础设施
+// 延迟池分配器（配置期递增；溢出时截断并置 S_OVERFLOW）
+function s_alloc(n) local(r, nn) (
+  nn = max(1.0, floor(n));
+  r = S_ALLOC;
+  (r + nn) > (BUS_POOL * BUS_MAX) ? (
+    S_OVERFLOW = 1.0;
+    nn = max(1.0, BUS_POOL * BUS_MAX - r);
+  );
+  S_ALLOC += nn;
+  r;
+);
+
+// 由 stage 基址反推其全局序号 / 所属总线（子表按此静态划分，无需运行时分配器）
+function s_sub(st)   ( floor((st - S_ST) / S_STAGE_STRIDE + 0.5); );
+function s_busof(st) ( floor(s_sub(st) / STAGE_MAX + 0.0001); );
+
+// 线性插值读（pos = 延迟样本数，调用前须已 clamp）
+function s_rd_lp(bse, len, wp, pos) local(ri, i0, i1, fr) (
+  ri = wp - pos;
+  ri < 0.0  ? ri += len;
+  ri >= len ? ri -= len;
+  i0 = floor(ri); fr = ri - i0;
+  i1 = i0 + 1.0; i1 >= len ? i1 = 0.0;
+  bse[i0] + (bse[i1] - bse[i0]) * fr;
+);
+
+// 一阶全通插值读（调制延迟用，比线性插值干净得多；yprev 需按通道分别保存）
+function s_rd_ap(bse, len, wp, pos, yprev) local(ri, i0, i1, fr, a) (
+  ri = wp - pos;
+  ri < 0.0  ? ri += len;
+  ri >= len ? ri -= len;
+  i0 = floor(ri); fr = ri - i0;
+  i1 = i0 + 1.0; i1 >= len ? i1 = 0.0;
+  a = (1.0 - fr) / (1.0 + fr);
+  a * bse[i0] + bse[i1] - a * yprev;
+);
+
+// 连续波形取值（S&H / 随机游走另在 s_p_mod 内处理，因其需状态）
+function s_wav(wf, p) local(v) (
+  wf == 0.0 ? ( v = sin(TWO_PI * p); ) :
+  wf == 1.0 ? ( v = 4.0 * abs(p - 0.5) - 1.0; ) :
+  wf == 2.0 ? ( v = 2.0 * p - 1.0; ) :
+  ( v = p < 0.5 ? 1.0 : -1.0; );
+  v;
+);
+
+// 一阶时间常数换算：ms（63% 时间常数 τ）→ 每样本平滑系数。
+//   ms > 0 → 1 - exp(-1/(ms·0.001·srate))，恒 ∈ (0,1)
+//   ms <= 0 → 1.0（瞬时跟随）。这是刻意的：ENV 的 attack 常常要"瞬时起攻、定时释放"
+//   （真峰值检波器），若把 0 也钳成 0.876，正弦稳态只能读到 0.92 而非 1.0。
+//   注意：MUL 的 smooth 走 `smooth_ms > 0 ? s_tconst : 0` 的守卫，不受此影响。
+function s_tconst(ms) ( ms > 0.0 ? 1.0 - exp(-1.0 / (max(0.01, ms) * 0.001 * srate)) : 1.0 );
+
+// 确定性哈希（DIFF 的 velvet-noise 抽头位置用；同 seed 必得同结果，烘焙可复现）
+function s_hash(x) local(v) (
+  v = sin(x * 127.1 + 311.7) * 43758.5453;
+  v - floor(v);
+);
+
+// rand 内建不在 LiveProg 已验证清单——若宿主未注册该函数，
+// 编译期即失败（整文件被判损坏）。改用确定性哈希 PRNG：每次掷骰推进 Z3 状态，
+// s_hash 输出 [0,1) → 映射 [-1,1)，与原 rand 内建的均匀取值等价（仅用于 MOD 级
+// S&H / 随机游走波形，行为与原版同分布、确定性更强——同状态必得同序列）。
+function s_rnd(st) ( st[S_ST_Z3] += 1.0; s_hash(st[S_ST_Z3] * 7.31 + 311.7) * 2.0 - 1.0; );
+
+// ---------------------------------------------------------------- primitive 1/13 · TAP
+// 多抽头阵列：每一抽头独立 延迟 / 左右增益（可负=极性）/ 一阶阻尼 / 调制量。
+// 布局：L 通道 [base, base+len)，R 通道 [base+len, base+2len)。
+function s_p_tap(st, il, ir)
+local(bse, bsr, len, wp, n, tb, gs, imd, mid, mdep, wet, dry, k, d, gl, gr, dc, xl, xr, ol, orv,
+      mv, ri, i0, i1, fr, a, zl, zr) (
+  bse = S_BUF + st[S_ST_BUF]; len = st[S_ST_LEN]; wp = st[S_ST_WP];
+  bsr = bse + len;                      // R 通道缓冲基址
+  n   = st[S_ST_A0];  tb  = st[S_ST_A1];
+  gs  = st[S_ST_A2];  imd = st[S_ST_A3]; mid = st[S_ST_A4]; mdep = st[S_ST_A5];
+  wet = st[S_ST_A6];  dry = st[S_ST_A7];
+  bse[wp] = il; bsr[wp] = ir;
+  ol = 0.0; orv = 0.0;
+  // mid 三元提到 stage 级：静态抽头（mid<0，D 已由 s_add_tap 预钳）免去每抽头的 +0.0 加法 / mid 比较 / min-max；
+  //   调制路径 mid ≥ 0 已由本分支保证，抽头级不再重复判定。
+  mid >= 0.0 ? (
+    mv = S_MODV[mid * 2.0];
+    k = 0.0;
+    loop(n,
+      d = S_TAP[tb + S_TAP_D] + mv * S_TAP[tb + S_TAP_M] * mdep;
+      d = max(1.0, min(len - 2.0, d));
+    // 内联插值读，L/R 共用同一份读位置：两通道的 wp / len / d 相同，ri / i0 / fr / 全通系数 a 只算一次
+    //   （省 2 次函数调用 + 1 次除法 + 1 次 floor）。公式与 s_rd_lp / s_rd_ap 逐字相同。
+    ri = wp - d;
+    ri < 0.0  ? ri += len;
+    ri >= len ? ri -= len;
+    i0 = floor(ri); fr = ri - i0;
+    i1 = i0 + 1.0; i1 >= len ? i1 = 0.0;
+    imd != 0.0 ? (
+      a  = (1.0 - fr) / (1.0 + fr);
+      zl = S_TAP[tb + S_TAP_ZAL]; zr = S_TAP[tb + S_TAP_ZAR];
+      xl = a * bse[i0] + bse[i1] - a * zl;
+      xr = a * bsr[i0] + bsr[i1] - a * zr;
+      S_TAP[tb + S_TAP_ZAL] = xl; S_TAP[tb + S_TAP_ZAR] = xr;
+    ) : (
+      xl = bse[i0] + (bse[i1] - bse[i0]) * fr;
+      xr = bsr[i0] + (bsr[i1] - bsr[i0]) * fr;
+    );
+    dc = S_TAP[tb + S_TAP_C];
+    dc > 0.0 ? (
+      // 阻尼状态局部缓存：每通道 2 次数组访问；算式顺序不变
+      zl = S_TAP[tb + S_TAP_ZDL]; zr = S_TAP[tb + S_TAP_ZDR];
+      zl += (xl - zl) * dc + DENORM_NOISE;
+      zr += (xr - zr) * dc + DENORM_NOISE;
+      S_TAP[tb + S_TAP_ZDL] = zl; S_TAP[tb + S_TAP_ZDR] = zr;
+      xl = zl; xr = zr;
+    );
+    gl = S_TAP[tb + S_TAP_GL]; gr = S_TAP[tb + S_TAP_GR];
+    ol += xl * gl; orv += xr * gr;
+    tb += S_TAP_STRIDE; k += 1.0;
+    );
+  ) : (
+    k = 0.0;
+    loop(n,
+      d = S_TAP[tb + S_TAP_D];
+      ri = wp - d;
+      ri < 0.0  ? ri += len;
+      ri >= len ? ri -= len;
+      i0 = floor(ri); fr = ri - i0;
+      i1 = i0 + 1.0; i1 >= len ? i1 = 0.0;
+      imd != 0.0 ? (
+        a  = (1.0 - fr) / (1.0 + fr);
+        zl = S_TAP[tb + S_TAP_ZAL]; zr = S_TAP[tb + S_TAP_ZAR];
+        xl = a * bse[i0] + bse[i1] - a * zl;
+        xr = a * bsr[i0] + bsr[i1] - a * zr;
+        S_TAP[tb + S_TAP_ZAL] = xl; S_TAP[tb + S_TAP_ZAR] = xr;
+      ) : (
+        xl = bse[i0] + (bse[i1] - bse[i0]) * fr;
+        xr = bsr[i0] + (bsr[i1] - bsr[i0]) * fr;
+      );
+      dc = S_TAP[tb + S_TAP_C];
+      dc > 0.0 ? (
+        zl = S_TAP[tb + S_TAP_ZDL]; zr = S_TAP[tb + S_TAP_ZDR];
+        zl += (xl - zl) * dc + DENORM_NOISE;
+        zr += (xr - zr) * dc + DENORM_NOISE;
+        S_TAP[tb + S_TAP_ZDL] = zl; S_TAP[tb + S_TAP_ZDR] = zr;
+        xl = zl; xr = zr;
+      );
+      gl = S_TAP[tb + S_TAP_GL]; gr = S_TAP[tb + S_TAP_GR];
+      ol += xl * gl; orv += xr * gr;
+      tb += S_TAP_STRIDE; k += 1.0;
+    );
+  );
+  wp += 1.0; wp >= len ? wp = 0.0;
+  st[S_ST_WP] = wp;
+  S_OL = ol * gs * wet + il * dry;
+  S_OR = orv * gs * wet + ir * dry;
+);
+
+// ---------------------------------------------------------------- primitive 2/13 · LOOP
+// 真反馈延迟环（梳状 / 波导 / 板）：delay + fb + 可插拔环内滤波 + 输出抽头位置。
+// filt: 0=无 1=LP 2=HP 3=AP(一阶全通) 4=环内软限幅（sft 控制量）
+// 这才是声学上"共振 / 驻波 / 箱体"的那把钥匙（注意与既有 COMB 微分器区分）。
+function s_p_loop(st, il, ir)
+local(bse, len, wp, d, fb, fc, ft, otp, wet, dry, mid, mdep, dtu, xfb, sft,
+      dl, dr, xl, xr, yl, yr, nwl, nwr, od) (
+  bse = S_BUF + st[S_ST_BUF]; len = st[S_ST_LEN]; wp = st[S_ST_WP];
+  d   = st[S_ST_A0]; fb  = st[S_ST_A1]; fc  = st[S_ST_A2]; ft  = st[S_ST_A3];
+  otp = st[S_ST_A4]; wet = st[S_ST_A5]; dry = st[S_ST_A6];
+  mid = st[S_ST_A7]; mdep = st[S_ST_A8]; dtu = st[S_ST_A9];
+  xfb = st[S_ST_A10]; sft = st[S_ST_A11];
+  // 静态实例直读 A12/A13（已预钳）；调制实例现算。
+  //   A12/A13 未写时为 0（EEL2 缺省），故 mid<0 判断不能漏——分支即完整性保证。
+  mid >= 0.0 ? (
+    dl = d + S_MODV[mid * 2.0] * mdep;
+    dr = dl + dtu;
+    dl = max(1.0, min(len - 2.0, dl));
+    dr = max(1.0, min(len - 2.0, dr));
+  ) : (
+    dl = st[S_ST_A12];
+    dr = st[S_ST_A13];
+  );
+  xl = s_rd_lp(bse, len, wp, dl);
+  xr = s_rd_lp(bse + len, len, wp, dr);
+  ft == 1.0 ? (
+    st[S_ST_Z1] += (xl - st[S_ST_Z1]) * fc;
+    st[S_ST_Z2] += (xr - st[S_ST_Z2]) * fc;
+    xl = st[S_ST_Z1]; xr = st[S_ST_Z2];
+  ) : ft == 2.0 ? (
+    st[S_ST_Z1] += (xl - st[S_ST_Z1]) * fc;
+    st[S_ST_Z2] += (xr - st[S_ST_Z2]) * fc;
+    xl -= st[S_ST_Z1]; xr -= st[S_ST_Z2];
+  ) : ft == 3.0 ? (
+    yl = -fc * xl + st[S_ST_Z1]; st[S_ST_Z1] = xl + fc * yl; xl = yl;
+    yr = -fc * xr + st[S_ST_Z2]; st[S_ST_Z2] = xr + fc * yr; xr = yr;
+  ) : 0.0;
+  nwl = il + xl * fb + xr * xfb;
+  nwr = ir + xr * fb + xl * xfb;
+  ft == 4.0 ? (
+    nwl = nwl / (1.0 + abs(nwl) * sft);
+    nwr = nwr / (1.0 + abs(nwr) * sft);
+  );
+  bse[wp] = nwl + DENORM_NOISE;
+  bse[wp + len] = nwr + DENORM_NOISE;
+  wp += 1.0; wp >= len ? wp = 0.0;
+  st[S_ST_WP] = wp;
+  // 输出抽头：otp ∈ [0,1]，0 = 抽在入口（近似干声），1 = 抽在满延迟处
+  od = max(1.0, min(len - 2.0, dl * otp));
+  yl = s_rd_lp(bse, len, wp, od);
+  yr = s_rd_lp(bse + len, len, wp, max(1.0, min(len - 2.0, dr * otp)));
+  S_OL = yl * wet + il * dry;
+  S_OR = yr * wet + ir * dry;
+);
+
+// ---------------------------------------------------------------- primitive 3/13 · APD
+// Schroeder 真全通（带真实延迟）：级联 ns 级，每级独立延迟线。
+// 这是"扩散建立"的正解——加厚不加能量。L/R 可 detune 得到立体声加厚。
+// 布局：L 级 k → [base + k*len)，R 级 k → [base + ns*len + k*len)。
+function s_p_apd(st, il, ir)
+local(bse, len, wp, d, ns, g, mid, mdep, wet, dry, dtu, k, ob, dv, dvr, rbase,
+      yl, yr, vl, vr, xl, xr) (
+  bse = S_BUF + st[S_ST_BUF]; len = st[S_ST_LEN]; wp = st[S_ST_WP];
+  d   = st[S_ST_A0]; g  = st[S_ST_A1]; ns = st[S_ST_A2];
+  mid = st[S_ST_A3]; mdep = st[S_ST_A4]; wet = st[S_ST_A5];
+  dry = st[S_ST_A6]; dtu = st[S_ST_A7];
+  xl = il; xr = ir;
+  // dv 与 R 侧 clamp(dv+dtu) 级间不变（d/mid/mdep/dtu/len/wp/S_MODV 都
+  //   不在级内变）→ 外提每样本 1 次；rbase 双累加器（与 ob 同步步进 len）。
+  dv = max(1.0, min(len - 2.0, d + (mid >= 0.0 ? S_MODV[mid * 2.0] * mdep : 0.0)));
+  dvr = max(1.0, min(len - 2.0, dv + dtu));
+  ob = bse;
+  rbase = bse + ns * len;
+  k = 0.0;
+  loop(ns,
+    yl = s_rd_lp(ob, len, wp, dv);
+    yr = s_rd_lp(rbase, len, wp, dvr);
+    vl = xl + g * yl;  vr = xr + g * yr;
+    ob[wp] = vl + DENORM_NOISE;
+    rbase[wp] = vr + DENORM_NOISE;
+    xl = yl - g * vl;  xr = yr - g * vr;
+    ob += len;
+    rbase += len;
+    k += 1.0;
+  );
+  wp += 1.0; wp >= len ? wp = 0.0;
+  st[S_ST_WP] = wp;
+  S_OL = xl * wet + il * dry;
+  S_OR = xr * wet + ir * dry;
+);
+
+// ---------------------------------------------------------------- primitive 4/13 · MOD
+// 调制源（控制器，音频直通）。在每条总线的音频链之前先跑一遍，故书写顺序不影响。
+// wave: 0=sin 1=tri 2=saw 3=sqr 4=S&H 5=随机游走
+// env_amt ≠ 0 时，速率随输入包络加快（"动得越快、空间越活"）。
+// 产出写入 S_MODV[id*2](左) 与 S_MODV[id*2+1](右)；spread 给左右相位差。
+// S_MODV 是全局共享的：mod_id 不按总线区分，两条总线用同一个 id 时后写的
+//   MOD 覆盖前者。各总线在自己链内先跑一遍 MOD，故单总线内部不受影响。
+function s_p_mod(st, il, ir)
+local(id, wf, rt, dp, ph, sp, em, ph0, v0, v1, en, rr, wrapped) (
+  id = st[S_ST_A0]; wf = st[S_ST_A1]; rt = st[S_ST_A2]; dp = st[S_ST_A3];
+  ph = st[S_ST_A4]; sp = st[S_ST_A5]; em = st[S_ST_A6];
+  en = abs(il) + abs(ir);
+  st[S_ST_Z2] += (en - st[S_ST_Z2]) * 0.002;
+  rr = rt * (em != 0.0 ? 1.0 + st[S_ST_Z2] * em * 20.0 : 1.0);
+  rr = max(0.0, min(srate * 0.45, rr));
+  ph0 = st[S_ST_Z5] + rr * SR_INV;
+  wrapped = 0.0;
+  ph0 >= 1.0 ? ( ph0 -= 1.0; wrapped = 1.0; );
+  st[S_ST_Z5] = ph0;
+  v0 = s_wav(wf, ph0 + ph - floor(ph0 + ph));
+  v1 = s_wav(wf, ph0 + ph + sp - floor(ph0 + ph + sp));
+  wf >= 4.0 ? (
+    wrapped != 0.0 ? (
+      // 按波形分支分别处理 L/R：wave=4 双侧均为 S&H；wave=5 双侧各自游走（左右状态独立 → 真正的立体声去相关）。
+      wf == 5.0 ? (
+        st[S_ST_Z1] = max(-1.0, min(1.0, st[S_ST_Z1] + s_rnd(st) * 0.3));
+        st[S_ST_Z4] = max(-1.0, min(1.0, st[S_ST_Z4] + s_rnd(st) * 0.3));
+      ) : (
+        st[S_ST_Z1] = s_rnd(st);
+        st[S_ST_Z4] = s_rnd(st);
+      );
+      v0 = st[S_ST_Z1]; v1 = st[S_ST_Z4];
+    ) : (
+      v0 = st[S_ST_Z1]; v1 = st[S_ST_Z4];
+    );
+  );
+  // id < 0 = 不写输出（配置侧已钳上界；不能钳到 0，否则关闭语义的 -1 会变成 0，静默覆盖 0 号调制源槽）
+  id = min(MOD_MAX - 1.0, floor(id));
+  id >= 0.0 ? (
+    S_MODV[id * 2.0] = v0 * dp;
+    S_MODV[id * 2.0 + 1.0] = v1 * dp;
+  );
+  S_OL = il; S_OR = ir;
+);
+
+// ---------------------------------------------------------------- primitive 5/13 · FDN
+// 反馈延迟网络：n 条延迟线 + 每线阻尼 + 反馈矩阵 + 每线独立 T60。
+// 输入耦合：每线独立 inL/inR（左右激励不同线 = 天然去相关）；
+// 输出耦合：每线独立 outL/outR（= 立体声铺开方式由你定）。
+// matrix: 0=Householder(无损，任意 n，推荐) 1=单位(无耦合) 2=旋转(2x2 块，角度=mat_arg)
+//         3=用户(S_MTXSET) 4=循环置换(无损) 5=Hadamard(n 为 2 的幂，否则回落 Householder)
+function s_p_fdn(st, il, ir)
+local(nn, lb, mb, wet, dry, mid, mdep, tb, k, j, dst, bse, len, wp, y, acc, nv, ol, orv, dv,
+      cz, zz, ag, az) (
+  nn = st[S_ST_A0]; lb = st[S_ST_A1]; mb = st[S_ST_A4];
+  wet = st[S_ST_A5]; dry = st[S_ST_A6]; mid = st[S_ST_A7]; mdep = st[S_ST_A8];
+  // 总线基址是配置期常量，由 s_add_fdn 预算进 A9（运行期不再调用 s_busof）。
+  tb = st[S_ST_A9];
+  ol = 0.0; orv = 0.0;
+  k = 0.0;
+  loop(nn,
+    dst = lb + k * S_FDN_STRIDE;
+    bse = S_BUF + S_FDN[dst + S_FDN_BUF];
+    len = S_FDN[dst + S_FDN_LEN];
+    wp  = S_FDN[dst + S_FDN_WP];
+    dv  = S_FDN[dst + S_FDN_D] + (mid >= 0.0 ? S_MODV[mid * 2.0] * mdep : 0.0);
+    y = s_rd_lp(bse, len, wp, max(1.0, min(len - 2.0, dv)));
+    // 状态局部缓存：C / Z / AG / AZ 各读一次、写一次；算式运算顺序不变。
+    cz = S_FDN[dst + S_FDN_C];
+    cz > 0.0 ? (
+      zz = S_FDN[dst + S_FDN_Z];
+      zz += (y - zz) * cz;
+      S_FDN[dst + S_FDN_Z] = zz;
+      y = zz;
+    );
+    // 每线吸收滤波器 H = g + (1-g)*LP：DC 增益 1、高频增益 g ∈ (0,1]。
+    //   |H| ∈ [g,1] 恒 ≤ 1 → 环增益 g_i·|H| < 1 严格成立，不会因吸收而发散。
+    //   AG == 1（abs_db = 0）时分支不执行。
+    ag = S_FDN[dst + S_FDN_AG];
+    ag < 1.0 ? (
+      // 吸收把 y 再衰减一道，强吸收时余量变小 → AZ 也补注入
+      az = S_FDN[dst + S_FDN_AZ];
+      az += (y - az) * S_FDN[dst + S_FDN_AC] + DENORM_NOISE;
+      S_FDN[dst + S_FDN_AZ] = az;
+      y = ag * y + (1.0 - ag) * az + DENORM_NOISE;
+    );
+    tb[k] = y;
+    ol  += y * S_FDN[dst + S_FDN_OL];
+    orv += y * S_FDN[dst + S_FDN_OR];
+    k += 1.0;
+  );
+  k = 0.0;
+  loop(nn,
+    dst = lb + k * S_FDN_STRIDE;
+    acc = 0.0; j = 0.0;
+    loop(nn, acc += S_MTX[mb + k * nn + j] * tb[j]; j += 1.0; );
+    nv = il * S_FDN[dst + S_FDN_INL] + ir * S_FDN[dst + S_FDN_INR]
+       + acc * S_FDN[dst + S_FDN_G] + DENORM_NOISE;
+    bse = S_BUF + S_FDN[dst + S_FDN_BUF];
+    len = S_FDN[dst + S_FDN_LEN];
+    wp  = S_FDN[dst + S_FDN_WP];
+    bse[wp] = nv;
+    wp += 1.0; wp >= len ? wp = 0.0;
+    S_FDN[dst + S_FDN_WP] = wp;
+    k += 1.0;
+  );
+  S_OL = ol * wet + il * dry;
+  S_OR = orv * wet + ir * dry;
+);
+
+// ---------------------------------------------------------------- primitive 6/13 · DIFF
+// 密度反射（velvet noise）：无音染的密集反射 / 扩散板。
+// 配置期按 seed 生成抽头表，运行期就是 TAP —— 与多抽头本就是同一件事。
+
+// ---------------------------------------------------------------- primitive 7/13 · MSX
+// 完整 M/S 矩阵：旋转角 + M/S 增益 + 双向耦合（含符号）+ 干湿。
+// 比 CONST_WIDTH_COMP 那种"乘常数 side"高一个维度：那只是改平衡，这才是改相关性。
+function s_p_msx(st, il, ir)
+local(rot, gm, gs, cms, csm, wet, dry, m, s, m2, s2, cr, sr) (
+  rot = st[S_ST_A0]; gm  = st[S_ST_A1]; gs  = st[S_ST_A2];
+  cms = st[S_ST_A3]; csm = st[S_ST_A4]; wet = st[S_ST_A5]; dry = st[S_ST_A6];
+  m = (il + ir) * 0.5; s = (il - ir) * 0.5;
+  cr = cos(rot); sr = sin(rot);
+  m2 = m * cr - s * sr + s * csm;
+  s2 = m * sr + s * cr + m * cms;
+  m2 *= gm; s2 *= gs;
+  S_OL = (m2 + s2) * wet + il * dry;
+  S_OR = (m2 - s2) * wet + ir * dry;
+);
+
+// ---------------------------------------------------------------- primitive 8/13 · BAND
+// 分频段空间：级联一阶分频，每段独立 width / delay / gain / damping。
+// 低频收窄、高频加宽、中频提前——"频段相关宽度"是立体声修整的刚需。
+function s_p_band(st, il, ir)
+local(nb, bb, wet, dry, nord, sel, k, bp, xl, xr, bl, br, m, s, dc, d,
+      lb2, ln, wpx, om, orv, j, a2, b2, cbd, zl, zr, gbd) (
+  nb = st[S_ST_A0]; bb = st[S_ST_A1]; wet = st[S_ST_A6]; dry = st[S_ST_A7];
+  nord = st[S_ST_A8]; sel = st[S_ST_A9];
+  xl = il; xr = ir;
+  om = 0.0; orv = 0.0;
+  k = 0.0;
+  loop(nb,
+    bp = bb + k * S_BAND_STRIDE;
+    k == (nb - 1.0) ? (
+      bl = xl; br = xr;
+    ) : (
+      // 分频斜率：1..BAND_ORD_MAX 级一阶 LP 级联（6/12/18/24 dB/oct）。
+      //   望远镜求和 band_k = x_k − LP^n(x_k)、x_{k+1} = LP^n(x_k)，
+      //   故 Σ band_k ≡ x_0 逐样本严格成立，与 n 无关 —— 升级斜率不破坏重建。
+      a2 = xl; b2 = xr;
+      // 系数 C 在 j 循环内不变，只读一次；状态局部缓存（每通道每级 2 次数组访问）。算式顺序不变。
+      cbd = S_BAND[bp + S_BD_C];
+      j = 0.0;
+      loop(nord,
+        zl = S_BAND[bp + S_BD_ZSL + j];
+        zl += (a2 - zl) * cbd + DENORM_NOISE;
+        S_BAND[bp + S_BD_ZSL + j] = zl;
+        a2 = zl;
+        zr = S_BAND[bp + S_BD_ZSR + j];
+        zr += (b2 - zr) * cbd + DENORM_NOISE;
+        S_BAND[bp + S_BD_ZSR + j] = zr;
+        b2 = zr;
+        j += 1.0;
+      );
+      bl = xl - a2; br = xr - b2;
+      xl = a2;      xr = b2;
+    );
+    // 逐段 pan：L/R 独立增益
+    bl *= S_BAND[bp + S_BD_GL]; br *= S_BAND[bp + S_BD_GR];
+    m = (bl + br) * 0.5; s = (bl - br) * 0.5;
+    s *= S_BAND[bp + S_BD_W];
+    dc = S_BAND[bp + S_BD_DC];
+    dc > 0.0 ? (
+      S_BAND[bp + S_BD_ZDL] += (m - S_BAND[bp + S_BD_ZDL]) * dc;
+      S_BAND[bp + S_BD_ZDR] += (s - S_BAND[bp + S_BD_ZDR]) * dc;
+      m = S_BAND[bp + S_BD_ZDL]; s = S_BAND[bp + S_BD_ZDR];
+    );
+    d = S_BAND[bp + S_BD_DLY];
+    d >= 1.0 ? (
+      lb2 = S_BUF + S_BAND[bp + S_BD_BUF]; ln = S_BAND[bp + S_BD_LEN]; wpx = S_BAND[bp + S_BD_WP];
+      lb2[wpx] = m; lb2[wpx + ln] = s;
+      m = s_rd_lp(lb2, ln, wpx, min(ln - 2.0, d));
+      s = s_rd_lp(lb2 + ln, ln, wpx, min(ln - 2.0, d));
+      wpx += 1.0; wpx >= ln ? wpx = 0.0;
+      S_BAND[bp + S_BD_WP] = wpx;
+    );
+    // 段选择。sel >= 0 时其余各段仍照常计算，保持滤波状态预热。
+    gbd = S_BAND[bp + S_BD_G];
+    sel < 0.0 ? ( om += (m + s) * gbd; orv += (m - s) * gbd; )
+              : ( k == sel ? ( om += (m + s) * gbd;
+                               orv += (m - s) * gbd; ) : 0.0 );
+    k += 1.0;
+  );
+  S_OL = om * wet + il * dry;
+  S_OR = orv * wet + ir * dry;
+);
+
+// ---------------------------------------------------------------- primitive 9/13 · DECO
+// 去相关器：低频保持单声道（mono 兼容），高频走 L/R 两条不同的全通链。
+// "宽但不虚"的正解——只加宽高频，低频不碰，单声道兼容性不塌。
+function s_p_deco(st, il, ir)
+local(nn, bd, amt, lc, wet, dry, bse, len, wp, k, dL, dR, g, xl, xr, yl, yr, loL, loR, ml) (
+  nn = st[S_ST_A0]; bd  = st[S_ST_A1]; amt = st[S_ST_A2]; lc = st[S_ST_A3];
+  wet = st[S_ST_A5]; dry = st[S_ST_A6];
+  bse = S_BUF + st[S_ST_BUF]; len = st[S_ST_LEN]; wp = st[S_ST_WP];
+  st[S_ST_Z1] += (il - st[S_ST_Z1]) * lc;
+  st[S_ST_Z2] += (ir - st[S_ST_Z2]) * lc;
+  loL = st[S_ST_Z1]; loR = st[S_ST_Z2];
+  ml = (loL + loR) * 0.5;
+  xl = il - loL; xr = ir - loR;
+  g = amt * 0.7;
+  k = 0.0;
+  loop(nn,
+    dL = max(1.0, min(len - 2.0, bd * (1.0 + k * 0.41)));
+    dR = max(1.0, min(len - 2.0, bd * (1.31 + k * 0.73)));
+    yl = s_rd_lp(bse + k * len, len, wp, dL);
+    yr = s_rd_lp(bse + nn * len + k * len, len, wp, dR);
+    xl = xl + g * yl; xr = xr + g * yr;
+    bse[wp + k * len] = xl + DENORM_NOISE;
+    bse[wp + nn * len + k * len] = xr + DENORM_NOISE;
+    xl = yl - g * xl; xr = yr - g * xr;
+    k += 1.0;
+  );
+  wp += 1.0; wp >= len ? wp = 0.0;
+  st[S_ST_WP] = wp;
+  S_OL = (ml + xl) * wet + il * dry;
+  S_OR = (ml + xr) * wet + ir * dry;
+);
+
+// ---------------------------------------------------------------- primitive 10/13 · ITD
+// 左右独立延迟 + 独立电平：定位偏移 / Haas。
+// ⚠ 这是全部 primitive 中唯一会破坏单声道兼容的手段（左右到达时间不同），
+//    单声道下会变成梳状染色。需要 mono 兼容请改用 MSX 或 BAND。
+function s_p_itd(st, il, ir)
+local(bse, len, wp, dl, dr, gl, gr, wet, dry, ol, orv) (
+  bse = S_BUF + st[S_ST_BUF]; len = st[S_ST_LEN]; wp = st[S_ST_WP];
+  // 直读预钳槽 A4/A7（s_add_itd 固化；dl>=1.0 直通分支保留——
+  //   dly<1ms 时 A4 可为 0，直通路径语义不变）。
+  dl = st[S_ST_A4];
+  dr = st[S_ST_A7];
+  gl = st[S_ST_A2]; gr = st[S_ST_A3]; wet = st[S_ST_A5]; dry = st[S_ST_A6];
+  bse[wp] = il; bse[wp + len] = ir;
+  ol  = (dl >= 1.0 ? s_rd_lp(bse, len, wp, dl) : il) * gl;
+  orv = (dr >= 1.0 ? s_rd_lp(bse + len, len, wp, dr) : ir) * gr;
+  wp += 1.0; wp >= len ? wp = 0.0;
+  st[S_ST_WP] = wp;
+  S_OL = ol * wet + il * dry;
+  S_OR = orv * wet + ir * dry;
+);
+
+// ---------------------------------------------------------------- primitive 11/13 · RESO
+// 模态共振组：每模态独立 频率 / T60 / 左右增益 / 左右激励权重。
+// 二极点谐振器，按谐振峰单位增益归一化（gn 可再乘自定义系数）。
+// 琴体、房间模式、板共振——比"用 EQ 推一个尖峰"真实得多，因为它有衰减时间。
+function s_p_reso(st, il, ir)
+local(nn, rb, wet, dry, k, mp, xm, y, ol, orv) (
+  nn = st[S_ST_A0]; rb = st[S_ST_A1]; wet = st[S_ST_A5]; dry = st[S_ST_A6];
+  ol = 0.0; orv = 0.0;
+  k = 0.0;
+  loop(nn,
+    mp = rb + k * S_MODE_STRIDE;
+    xm = (il * S_RESO[mp + S_RSO_EX] + ir * (1.0 - S_RESO[mp + S_RSO_EX])) * S_RESO[mp + S_RSO_GN];
+    y = xm + S_RESO[mp + S_RSO_P1] * S_RESO[mp + S_RSO_Y1] + S_RESO[mp + S_RSO_P2] * S_RESO[mp + S_RSO_Y2];
+    S_RESO[mp + S_RSO_Y2] = S_RESO[mp + S_RSO_Y1];
+    S_RESO[mp + S_RSO_Y1] = y + DENORM_NOISE;
+    ol  += y * S_RESO[mp + S_RSO_GL];
+    orv += y * S_RESO[mp + S_RSO_GR];
+    k += 1.0;
+  );
+  S_OL = ol * wet + il * dry;
+  S_OR = orv * wet + ir * dry;
+);
+
+// ---------------------------------------------------------------- primitive 12/13 · AIR
+// 空气吸收 / 距离：cutoff>0 时直接用，否则由 distance 反推（20000·e^(-0.05d)）。
+// stages = 级联一阶低通数（1~4），给"远场沉暗"的斜率自由度。
+function s_p_air(st, il, ir)
+local(ns, gn, wet, dry, c, k, xl, xr) (
+  // cut / c / gn 是配置期常量，由 s_add_air 预算进 A6(c) / A7(gn)（运行期不再每样本重算 exp / 除法）。
+  ns = st[S_ST_A2]; wet = st[S_ST_A4]; dry = st[S_ST_A5];
+  c  = st[S_ST_A6]; gn = st[S_ST_A7];
+  xl = il; xr = ir;
+  k = 0.0;
+  // ns 已钳 [1,4]，级联展开无需 k<4.0 防御。
+  loop(ns,
+    st[S_ST_Z1 + k] += (xl - st[S_ST_Z1 + k]) * c + DENORM_NOISE;
+    st[S_ST_Z5 + k] += (xr - st[S_ST_Z5 + k]) * c + DENORM_NOISE;
+    xl = st[S_ST_Z1 + k]; xr = st[S_ST_Z5 + k];
+    k += 1.0;
+  );
+  S_OL = xl * gn * wet + il * dry;
+  S_OR = xr * gn * wet + ir * dry;
+);
+
+// ---------------------------------------------------------------- primitive 13/13 · DOP
+// 移动读头：base ± range 扫动 + 反馈 → chorus / flanger / 多普勒 / wow&flutter。
+// 与 MOD 的区别：DOP 自带读头与反馈，是完整效果；MOD 是可路由的调制源。
+function s_p_dop(st, il, ir)
+local(bse, len, wp, d0, rng, rt, wf, fb, wet, dry, sp, ph, p0, p1, dl, dr, xl, xr) (
+  bse = S_BUF + st[S_ST_BUF]; len = st[S_ST_LEN]; wp = st[S_ST_WP];
+  d0 = st[S_ST_A0]; rng = st[S_ST_A1]; rt = st[S_ST_A2]; wf = st[S_ST_A3];
+  fb = st[S_ST_A4]; wet = st[S_ST_A5]; dry = st[S_ST_A6]; sp = st[S_ST_A7];
+  ph = st[S_ST_Z1] + rt * SR_INV;
+  ph >= 1.0 ? ph -= 1.0;
+  st[S_ST_Z1] = ph;
+  p0 = ph; p1 = ph + sp; p1 >= 1.0 ? p1 -= 1.0;
+  dl = max(1.0, min(len - 2.0, d0 + rng * s_wav(wf, p0)));
+  dr = max(1.0, min(len - 2.0, d0 + rng * s_wav(wf, p1)));
+  xl = s_rd_lp(bse, len, wp, dl);
+  xr = s_rd_lp(bse + len, len, wp, dr);
+  bse[wp] = il + xl * fb + DENORM_NOISE;
+  bse[wp + len] = ir + xr * fb + DENORM_NOISE;
+  wp += 1.0; wp >= len ? wp = 0.0;
+  st[S_ST_WP] = wp;
+  S_OL = xl * wet + il * dry;
+  S_OR = xr * wet + ir * dry;
+);
+
+
+// ---------------------------------------------------------------- primitive 14 · TABLE
+// 任意传输曲线整形器：256 点表 + 线性插值。统一并超越全部既有软塑形。
+// 定义域：表索引覆盖 x ∈ [-1, 1]（x = in × drive）。域外由 mode 处理：
+//   0 = clamp（drive 越大越接近硬削波）  1 = mirror（反射折返）  2 = wrap（锯齿折返）
+// 曲线由 s_curve(i, v) 逐点填入 S_CURVESET，s_add_table 拷进本 stage 的曲线区。
+function s_p_table(st, il, ir)
+local(cb, nn, drv, md, wet, dry, gn, dc, xl, xr, idx, i0, fr, yl, yr) (
+  cb = st[S_ST_A4]; nn = st[S_ST_A5];
+  drv = st[S_ST_A0]; md = st[S_ST_A1];
+  wet = st[S_ST_A2]; dry = st[S_ST_A3];
+  gn = st[S_ST_A6];  dc = st[S_ST_A7];
+  xl = il * drv; xr = ir * drv;
+  md == 0.0 ? (
+    xl = max(-1.0, min(1.0, xl)); xr = max(-1.0, min(1.0, xr));
+  ) : md == 1.0 ? (
+    // 反射折返：先折到 [-2,2)，再对越界部分做镜像（周期 4 的三角波）
+    xl = xl - 4.0 * floor((xl + 2.0) * 0.25); xr = xr - 4.0 * floor((xr + 2.0) * 0.25);
+    xl >  1.0 ? xl =  2.0 - xl;
+    xl < -1.0 ? xl = -2.0 - xl;
+    xr >  1.0 ? xr =  2.0 - xr;
+    xr < -1.0 ? xr = -2.0 - xr;
+  ) : (
+    // 锯齿折返：折到 [-1,1)
+    xl = xl - 2.0 * floor((xl + 1.0) * 0.5); xr = xr - 2.0 * floor((xr + 1.0) * 0.5);
+  );
+  idx = (xl + 1.0) * 0.5 * (nn - 1.0);
+  i0 = floor(idx); i0 = max(0.0, min(nn - 2.0, i0)); fr = idx - i0;
+  yl = S_CURVE[cb + i0] + (S_CURVE[cb + i0 + 1.0] - S_CURVE[cb + i0]) * fr;
+  idx = (xr + 1.0) * 0.5 * (nn - 1.0);
+  i0 = floor(idx); i0 = max(0.0, min(nn - 2.0, i0)); fr = idx - i0;
+  yr = S_CURVE[cb + i0] + (S_CURVE[cb + i0 + 1.0] - S_CURVE[cb + i0]) * fr;
+  yl *= gn; yr *= gn;
+  dc > 0.0 ? (
+    st[S_ST_Z1] += (yl - st[S_ST_Z1]) * dc;
+    st[S_ST_Z2] += (yr - st[S_ST_Z2]) * dc;
+    yl -= st[S_ST_Z1]; yr -= st[S_ST_Z2];
+  );
+  S_OL = yl * wet + il * dry;
+  S_OR = yr * wet + ir * dry;
+);
+
+// ---------------------------------------------------------------- primitive 15 · MUL
+// 乘法器：out = in × src，src = bias + mod_amt×MOD + env_amt×ENV（三项直接相加）。
+// 刻意不做"源类型枚举"——一个表达式覆盖环形调制 / AM / 颤音 / 门控 / 斩波 / 闪避，
+// 且任意组合。L/R 各取源的左右槽 → MOD 的 spread 直接产生立体声颤音。
+function s_p_mul(st, il, ir)
+local(bias, mid, ma, eid, ea, sm, cp, wet, dry, sl, sr) (
+  bias = st[S_ST_A0]; mid = st[S_ST_A1]; ma  = st[S_ST_A2];
+  eid  = st[S_ST_A3]; ea  = st[S_ST_A4]; sm  = st[S_ST_A5]; cp = st[S_ST_A6];
+  wet  = st[S_ST_A7]; dry = st[S_ST_A8];
+  sl = bias; sr = bias;
+  mid >= 0.0 ? ( sl += S_MODV[mid * 2.0] * ma;     sr += S_MODV[mid * 2.0 + 1.0] * ma; );
+  eid >= 0.0 ? ( sl += S_ENVV[eid * 2.0] * ea;     sr += S_ENVV[eid * 2.0 + 1.0] * ea; );
+  sm > 0.0 ? (
+    st[S_ST_Z1] += (sl - st[S_ST_Z1]) * sm + DENORM_NOISE;
+    st[S_ST_Z2] += (sr - st[S_ST_Z2]) * sm + DENORM_NOISE;
+    sl = st[S_ST_Z1]; sr = st[S_ST_Z2];
+  );
+  cp > 0.0 ? ( sl = max(-cp, min(cp, sl)); sr = max(-cp, min(cp, sr)); );
+  S_OL = il * sl * wet + il * dry;
+  S_OR = ir * sr * wet + ir * dry;
+);
+
+// ---------------------------------------------------------------- primitive 16 · ENV
+// 包络检波器（生产者）：写 S_ENVV[id*2](左) / [id*2+1](右)，音频直通。
+// mode: 0 = peak（整流 + 攻击/释放跟随）  1 = RMS（平方窗平滑后开方，再跟随）
+// invert ≠ 0 → 输出 (1 - env)，即闪避语义（此时应让 env 落在 [0,1]）。
+function s_p_env(st, il, ir)
+local(id, md, atk, rel, gn, iv, cp, wc, rl, rr, cf, el, er) (
+  id = st[S_ST_A0]; md = st[S_ST_A1]; atk = st[S_ST_A2]; rel = st[S_ST_A3];
+  gn = st[S_ST_A4]; iv = st[S_ST_A5]; cp = st[S_ST_A6]; wc = st[S_ST_A7];
+  md == 1.0 ? (
+    st[S_ST_Z3] += (il * il - st[S_ST_Z3]) * wc + DENORM_NOISE;
+    st[S_ST_Z4] += (ir * ir - st[S_ST_Z4]) * wc + DENORM_NOISE;
+    rl = sqrt(max(0.0, st[S_ST_Z3])); rr = sqrt(max(0.0, st[S_ST_Z4]));
+  ) : (
+    rl = abs(il); rr = abs(ir);
+  );
+  cf = rl > st[S_ST_Z1] ? atk : rel;
+  st[S_ST_Z1] += (rl - st[S_ST_Z1]) * cf + DENORM_NOISE;
+  cf = rr > st[S_ST_Z2] ? atk : rel;
+  st[S_ST_Z2] += (rr - st[S_ST_Z2]) * cf + DENORM_NOISE;
+  el = st[S_ST_Z1] * gn; er = st[S_ST_Z2] * gn;
+  iv != 0.0 ? ( el = 1.0 - el; er = 1.0 - er; );
+  cp > 0.0 ? ( el = max(0.0, min(cp, el)); er = max(0.0, min(cp, er)); );
+  id = min(ENV_MAX - 1.0, floor(id));
+  id >= 0.0 ? (
+    S_ENVV[id * 2.0] = el;
+    S_ENVV[id * 2.0 + 1.0] = er;
+  );
+  S_OL = il; S_OR = ir;
+);
+
+// ---------------------------------------------------------------- primitive 17 · DOM
+// 纯域转换：mode 0 = L/R -> M/S（m=(L+R)/2, s=(L-R)/2）  1 = M/S -> L/R（L=m+s, R=m-s）
+// 往返恒等。夹在两个 DOM 之间的任何 primitive 都自动变成"作用于 M/S 域"。
+function s_p_dom(st, il, ir) local(md, m, s) (
+  md = st[S_ST_A0];
+  m = (il + ir) * 0.5; s = (il - ir) * 0.5;
+  md == 0.0 ? ( S_OL = m; S_OR = s; ) : ( S_OL = m + s; S_OR = m - s; );
+);
+
+
+
+// ---------------------------------------------------------------- primitive 22 · NOISE
+// 噪声源。type: 0 = 白  1 = 粉（Paul Kellet 7 节，−3dB/oct）  2 = 棕（泄漏积分，−6dB/oct）
+// 左右用独立 PRNG 状态（Z15/Z16）→ 天然去相关。粉/棕各自独立状态链。
+// ⚠ 粉噪滤波器输出 RMS 是白噪的 3.06 倍 → 归一化系数在配置期算好（A3）。
+// ⚠ 棕噪用泄漏积分器（DC 增益恰为 1），不会无界漂移；归一化系数 A4。
+function s_p_noise(st, il, ir)
+local(ty, lv, nw, npk, nbr, a, wet, dry, wl, wr, pl, pr) (
+  ty  = st[S_ST_A0]; lv = st[S_ST_A1];
+  nw  = st[S_ST_A2]; npk = st[S_ST_A3]; nbr = st[S_ST_A4]; a = st[S_ST_A5];
+  wet = st[S_ST_A6]; dry = st[S_ST_A7];
+  st[S_ST_Z15] += 1.0; wl = s_hash(st[S_ST_Z15] * 7.31 + 311.7) * 2.0 - 1.0;
+  st[S_ST_Z16] += 1.0; wr = s_hash(st[S_ST_Z16] * 11.17 + 733.3) * 2.0 - 1.0;
+  ty == 0.0 ? (
+    pl = wl * nw; pr = wr * nw;
+  ) : ty == 1.0 ? (
+    st[S_ST_Z1]  = 0.99886 * st[S_ST_Z1]  + wl * 0.0555179;
+    st[S_ST_Z2]  = 0.99332 * st[S_ST_Z2]  + wl * 0.0750759;
+    st[S_ST_Z3]  = 0.96900 * st[S_ST_Z3]  + wl * 0.1538520;
+    st[S_ST_Z4]  = 0.86650 * st[S_ST_Z4]  + wl * 0.3104856;
+    st[S_ST_Z5]  = 0.55000 * st[S_ST_Z5]  + wl * 0.5329522;
+    st[S_ST_Z6]  = -0.7616 * st[S_ST_Z6]  - wl * 0.0168980;
+    pl = st[S_ST_Z1] + st[S_ST_Z2] + st[S_ST_Z3] + st[S_ST_Z4]
+       + st[S_ST_Z5] + st[S_ST_Z6] + st[S_ST_Z7] + wl * 0.5362;
+    st[S_ST_Z7] = wl * 0.115926;
+    pl *= npk;
+    st[S_ST_Z8]  = 0.99886 * st[S_ST_Z8]  + wr * 0.0555179;
+    st[S_ST_Z9]  = 0.99332 * st[S_ST_Z9]  + wr * 0.0750759;
+    st[S_ST_Z10] = 0.96900 * st[S_ST_Z10] + wr * 0.1538520;
+    st[S_ST_Z11] = 0.86650 * st[S_ST_Z11] + wr * 0.3104856;
+    st[S_ST_Z12] = 0.55000 * st[S_ST_Z12] + wr * 0.5329522;
+    st[S_ST_Z13] = -0.7616 * st[S_ST_Z13] - wr * 0.0168980;
+    pr = st[S_ST_Z8] + st[S_ST_Z9] + st[S_ST_Z10] + st[S_ST_Z11]
+       + st[S_ST_Z12] + st[S_ST_Z13] + st[S_ST_Z14] + wr * 0.5362;
+    st[S_ST_Z14] = wr * 0.115926;
+    pr *= npk;
+  ) : (
+    st[S_ST_Z17] = a * st[S_ST_Z17] + (1.0 - a) * wl;
+    st[S_ST_Z18] = a * st[S_ST_Z18] + (1.0 - a) * wr;
+    pl = st[S_ST_Z17] * nbr; pr = st[S_ST_Z18] * nbr;
+  );
+  S_OL = pl * lv * wet + il * dry;
+  S_OR = pr * lv * wet + ir * dry;
+);
+
+// ---------------------------------------------------------------- primitive 18 · BQ
+// 双二阶滤波器（直接 II 型转置）。A0..A4 = b0,b1,b2,a1,a2；A5=wet A6=dry
+// 状态：Z1,Z2 = L 通道两级延迟；Z3,Z4 = R 通道
+function s_p_bq(st, il, ir)
+local(b0, b1, b2, a1, a2, wet, dry, yl, yr, xl, xr) (
+  b0 = st[S_ST_A0]; b1 = st[S_ST_A1]; b2 = st[S_ST_A2];
+  a1 = st[S_ST_A3]; a2 = st[S_ST_A4];
+  wet = st[S_ST_A5]; dry = st[S_ST_A6];
+  xl = il; xr = ir;
+  yl = b0 * xl + st[S_ST_Z1];
+  yr = b0 * xr + st[S_ST_Z3];
+  st[S_ST_Z1] = b1 * xl - a1 * yl + st[S_ST_Z2] + DENORM_NOISE;
+  st[S_ST_Z2] = b2 * xl - a2 * yl;
+  st[S_ST_Z3] = b1 * xr - a1 * yr + st[S_ST_Z4] + DENORM_NOISE;
+  st[S_ST_Z4] = b2 * xr - a2 * yr;
+  S_OL = yl * wet + il * dry;
+  S_OR = yr * wet + ir * dry;
+);
+
+// ---------------------------------------------------------------- primitive 19 · XOVER
+// Linkwitz-Riley 功率互补分频。串行级联结构：
+//   x_0 = 输入；band_k = LP(f_k, x_k)；x_{k+1} = sg·HP(f_k, x_k)；末段 band = x_{nb-1}
+//   LR4: sg = +1（互补式 LP + HP = 1）    LR2: sg = -1（互补式 LP - HP = 1）
+// ⚠ 串行（而非并行）是刻意的：并行结构「band_k = HP(f_{k-1})·LP(f_k)」只在 LR4 且
+//   分频点间隔足够宽时近似成立；对 LR2 会彻底失效——实测 LR2 3-way 凹陷 17.2dB，
+//   因为 -(LP(f1)+HP(f1)) ≠ 1（LR2 的互补式是 LP-HP=1，不是 LP+HP=1）。
+//   串行结构下两者都严格成立：
+//     LR4: Σ = LP0 + HP0(LP1 + HP1) = LP0 + HP0 = 1
+//     LR2: Σ = LP0 - HP0·LP1 + HP0·HP1 = LP0 - HP0(LP1 - HP1) = LP0 - HP0 = 1
+//   附带好处：不再有"分频间隔 ≥3 倍频程"的限制（并行结构有，实测 1oct → 7.95dB）。
+function s_p_xover(st, il, ir)
+local(nb, sg, xb, wet, dry, sel, k, bp, xl, xr, t, y, j, os, om, orv, bl, br, nl, nr) (
+  nb = st[S_ST_A0]; sg = st[S_ST_A1]; xb = st[S_ST_A2];
+  wet = st[S_ST_A3]; dry = st[S_ST_A4]; sel = st[S_ST_A5];
+  om = 0.0; orv = 0.0;
+  xl = il; xr = ir;
+  k = 0.0;
+  loop(nb,
+    bp = xb + k * S_XO_STRIDE;
+    (k + 1.0) == nb ? (
+      bl = xl; br = xr;              // 末段：直接输出前级剩余（最高频）
+      nl = 0.0; nr = 0.0;
+    ) : (
+      bl = xl; br = xr; nl = xl; nr = xr;
+      j = 0.0;
+      loop(2.0,
+        j == 0.0 ? ( os = bp + S_XO_LS0; ) : ( os = bp + S_XO_LS1; );
+        t = S_XO[bp + S_XO_LB0] * bl + S_XO[os];
+        S_XO[os] = S_XO[bp + S_XO_LB0 + 1.0] * bl - S_XO[bp + S_XO_LB0 + 3.0] * t + S_XO[os + 1.0] + DENORM_NOISE;
+        S_XO[os + 1.0] = S_XO[bp + S_XO_LB0 + 2.0] * bl - S_XO[bp + S_XO_LB0 + 4.0] * t;
+        bl = t;
+        t = S_XO[bp + S_XO_LB0] * br + S_XO[os + 2.0];
+        S_XO[os + 2.0] = S_XO[bp + S_XO_LB0 + 1.0] * br - S_XO[bp + S_XO_LB0 + 3.0] * t + S_XO[os + 3.0] + DENORM_NOISE;
+        S_XO[os + 3.0] = S_XO[bp + S_XO_LB0 + 2.0] * br - S_XO[bp + S_XO_LB0 + 4.0] * t;
+        br = t;
+        j += 1.0;
+      );
+      j = 0.0;
+      loop(2.0,
+        j == 0.0 ? ( os = bp + S_XO_HS0; ) : ( os = bp + S_XO_HS1; );
+        t = S_XO[bp + S_XO_HB0] * nl + S_XO[os];
+        S_XO[os] = S_XO[bp + S_XO_HB0 + 1.0] * nl - S_XO[bp + S_XO_HB0 + 3.0] * t + S_XO[os + 1.0] + DENORM_NOISE;
+        S_XO[os + 1.0] = S_XO[bp + S_XO_HB0 + 2.0] * nl - S_XO[bp + S_XO_HB0 + 4.0] * t;
+        nl = t;
+        t = S_XO[bp + S_XO_HB0] * nr + S_XO[os + 2.0];
+        S_XO[os + 2.0] = S_XO[bp + S_XO_HB0 + 1.0] * nr - S_XO[bp + S_XO_HB0 + 3.0] * t + S_XO[os + 3.0] + DENORM_NOISE;
+        S_XO[os + 3.0] = S_XO[bp + S_XO_HB0 + 2.0] * nr - S_XO[bp + S_XO_HB0 + 4.0] * t;
+        nr = t;
+        j += 1.0;
+      );
+      nl *= sg; nr *= sg;
+    );
+    bl *= S_XO[bp + S_XO_GL]; br *= S_XO[bp + S_XO_GR];
+    S_XO[bp + S_XO_DLY] >= 1.0 ? (
+      t = S_BUF + S_XO[bp + S_XO_BUF];
+      y = S_XO[bp + S_XO_LEN];
+      j = S_XO[bp + S_XO_WP];
+      t[j] = bl; t[j + y] = br;
+      bl = s_rd_lp(t, y, j, min(y - 2.0, S_XO[bp + S_XO_DLY]));
+      br = s_rd_lp(t + y, y, j, min(y - 2.0, S_XO[bp + S_XO_DLY]));
+      j += 1.0; j >= y ? j = 0.0;
+      S_XO[bp + S_XO_WP] = j;
+    );
+    // 段选择。sel >= 0 时其余各段仍照常计算（滤波状态必须保持
+    // 预热，否则切换段选会爆音），只是不累加进输出。
+    sel < 0.0 ? ( om += bl; orv += br; )
+              : ( k == sel ? ( om += bl; orv += br; ) : 0.0 );
+    xl = nl; xr = nr;
+    k += 1.0;
+  );
+  S_OL = om * wet + il * dry;
+  S_OR = orv * wet + ir * dry;
+);
+
+// ---------------------------------------------------------------- primitive 20 · DYN
+// 动态增益单元。线性域精确压缩曲线：g = (x/t)^(1/ratio - 1)（与 dB 域公式逐点等价）。
+// 软拐点：过渡区以 g_hard(hi) 为终点做 smoothstep 混合（保证单调不增、恒 ≤1）。
+// GR（增益值）写入 S_ENVV[gr_id] → MUL 可直接引用做闪避。
+// EEL2 要求函数先定义后调用：本函数必须位于 s_p_dyn 之前（定义晚于调用 → LiveProg 编译失败判损坏）。
+// 静态曲线（线性域）：x = 检测电平，t = 阈值，ir2 = 1/ratio，kn = 拐点宽度(0..1)
+function s_dyn_curve(x, t, ir2, kn)
+local(lo, hi, gh, ghi, u) (
+  lo = t * (1.0 - kn); hi = t * (1.0 + kn);
+  x <= lo ? ( 1.0 ) : (
+    gh = pow(x / t, ir2 - 1.0);
+    x >= hi ? ( gh ) : (
+      ghi = pow(hi / t, ir2 - 1.0);
+      u = max(0.0, min(1.0, (x - lo) / max(0.000000000001, hi - lo)));
+      1.0 + (ghi - 1.0) * (u * u * (3.0 - 2.0 * u));
+    );
+  );
+);
+
+function s_p_dyn(st, il, ir)
+local(th, ir2, kn, atk, rel, wc, mk, gid, gm, wet, dry, xl, xr, ll, lr2, gtl, gtr, cf) (
+  th = st[S_ST_A0]; ir2 = st[S_ST_A1]; kn = st[S_ST_A2];
+  atk = st[S_ST_A3]; rel = st[S_ST_A4]; wc = st[S_ST_A5];
+  mk = st[S_ST_A6]; gid = st[S_ST_A7]; gm = st[S_ST_A8];
+  wet = st[S_ST_A9]; dry = st[S_ST_A10];
+  // 检测电平
+  wc > 0.0 ? (
+    st[S_ST_Z3] += (il * il - st[S_ST_Z3]) * wc + DENORM_NOISE;
+    st[S_ST_Z4] += (ir * ir - st[S_ST_Z4]) * wc + DENORM_NOISE;
+    ll = sqrt(max(0.0, st[S_ST_Z3])); lr2 = sqrt(max(0.0, st[S_ST_Z4]));
+  ) : (
+    ll = abs(il); lr2 = abs(ir);
+  );
+  gtl = s_dyn_curve(max(ll, 0.000000001), th, ir2, kn);
+  gtr = s_dyn_curve(max(lr2, 0.000000001), th, ir2, kn);
+  gtl *= mk; gtr *= mk;
+  gm > 0.0 ? ( gtl = min(gm, gtl); gtr = min(gm, gtr); );
+  // 增益平滑：下降走 atk，上升走 rel
+  cf = gtl < st[S_ST_Z1] ? atk : rel;
+  st[S_ST_Z1] += (gtl - st[S_ST_Z1]) * cf + DENORM_NOISE;
+  cf = gtr < st[S_ST_Z2] ? atk : rel;
+  st[S_ST_Z2] += (gtr - st[S_ST_Z2]) * cf + DENORM_NOISE;
+  gid = min(ENV_MAX - 1.0, floor(gid));
+  gid >= 0.0 ? ( S_ENVV[gid * 2.0] = st[S_ST_Z1]; S_ENVV[gid * 2.0 + 1.0] = st[S_ST_Z2]; );
+  S_OL = il * st[S_ST_Z1] * wet + il * dry;
+  S_OR = ir * st[S_ST_Z2] * wet + ir * dry;
+);
+
+// ---------------------------------------------------------------- primitive 21 · TRANS
+// 瞬态设计：nd = (env_fast − env_slow) / (env_slow + floor)，归一化瞬态量。
+// gain = sus_gain + clamp(nd, 0, nd_max) · atk_amt，再平滑防爆音。
+// ⚠ fast 建议 ≥5ms：太短会把稳态波形起伏误判为瞬态（实测 1ms 时稳态 nd 峰峰 0.23）。
+function s_p_trans(st, il, ir)
+local(fc, sc, aa, sg, po, nm, atk, rel, gm, wet, dry, fl, fr, sl, sr, ndl, ndr, gtl, gtr, cf) (
+  fc = st[S_ST_A0]; sc = st[S_ST_A1]; aa = st[S_ST_A2]; sg = st[S_ST_A3];
+  po = st[S_ST_A4]; nm = st[S_ST_A5]; atk = st[S_ST_A6]; rel = st[S_ST_A7];
+  gm = st[S_ST_A8]; wet = st[S_ST_A9]; dry = st[S_ST_A10];
+  st[S_ST_Z1] += (abs(il) - st[S_ST_Z1]) * fc + DENORM_NOISE;
+  st[S_ST_Z2] += (abs(ir) - st[S_ST_Z2]) * fc + DENORM_NOISE;
+  st[S_ST_Z3] += (abs(il) - st[S_ST_Z3]) * sc + DENORM_NOISE;
+  st[S_ST_Z4] += (abs(ir) - st[S_ST_Z4]) * sc + DENORM_NOISE;
+  fl = st[S_ST_Z1]; fr = st[S_ST_Z2]; sl = st[S_ST_Z3]; sr = st[S_ST_Z4];
+  ndl = (fl - sl) / (sl + 0.0001);
+  ndr = (fr - sr) / (sr + 0.0001);
+  po != 0.0 ? ( ndl = max(0.0, ndl); ndr = max(0.0, ndr); );
+  ndl = max(-nm, min(nm, ndl)); ndr = max(-nm, min(nm, ndr));
+  gtl = sg + ndl * aa; gtr = sg + ndr * aa;
+  gm > 0.0 ? ( gtl = min(gm, max(0.0, gtl)); gtr = min(gm, max(0.0, gtr)); );
+  cf = gtl < st[S_ST_Z5] ? atk : rel;
+  st[S_ST_Z5] += (gtl - st[S_ST_Z5]) * cf;
+  cf = gtr < st[S_ST_Z6] ? atk : rel;
+  st[S_ST_Z6] += (gtr - st[S_ST_Z6]) * cf;
+  S_OL = il * st[S_ST_Z5] * wet + il * dry;
+  S_OR = ir * st[S_ST_Z6] * wet + ir * dry;
+);
+
+// ---------------------------------------------------------------- 总线调度
+// 先跑一遍调制源（故 MOD 的书写位置不影响结果），再按书写顺序跑音频链。
+function s_run_bus(b, il, ir) local(sb, nm, i, sbase, st, t) (
+  sb = S_BUSP + b * S_BUS_STRIDE;
+  // 输入增益不在函数内二次相乘：调用点已乘 S_BUSIN 快表（再乘一次会使实际增益 = in_gain 的平方）。
+  nm = sb[S_BUS_NPROD];
+  sbase = S_ST + b * STAGE_MAX * S_STAGE_STRIDE;
+  // 生产者先跑一遍（MOD / ENV）：写 S_MODV / S_ENVV，音频直通。
+  //   故其书写位置不影响结果；代价是它们只能看到总线输入，看不到链中后段。
+  nm != 0.0 ? (
+    i = 0.0;
+    loop(sb[S_BUS_STAGES],
+      st = sbase + i * S_STAGE_STRIDE;
+      t = st[S_ST_TYPE];
+      t == S_T_MOD ? s_p_mod(st, il, ir);
+      t == S_T_ENV ? s_p_env(st, il, ir);
+      i += 1.0;
+    );
+  );
+  i = 0.0;
+  loop(sb[S_BUS_STAGES],
+    st = sbase + i * S_STAGE_STRIDE;
+    t = st[S_ST_TYPE];
+    t == S_T_TAP  ? ( s_p_tap(st, il, ir);  il = S_OL; ir = S_OR; ) :
+    t == S_T_BQ    ? ( s_p_bq(st, il, ir);    il = S_OL; ir = S_OR; ) :
+    t == S_T_AIR  ? ( s_p_air(st, il, ir);  il = S_OL; ir = S_OR; ) :
+    t == S_T_FDN  ? ( s_p_fdn(st, il, ir);  il = S_OL; ir = S_OR; ) :
+    t == S_T_BAND ? ( s_p_band(st, il, ir); il = S_OL; ir = S_OR; ) :
+    t == S_T_APD  ? ( s_p_apd(st, il, ir);  il = S_OL; ir = S_OR; ) :
+    t == S_T_DECO ? ( s_p_deco(st, il, ir); il = S_OL; ir = S_OR; ) :
+    t == S_T_MUL  ? ( s_p_mul(st, il, ir);   il = S_OL; ir = S_OR; ) :
+    t == S_T_LOOP ? ( s_p_loop(st, il, ir); il = S_OL; ir = S_OR; ) :
+    t == S_T_MSX  ? ( s_p_msx(st, il, ir);  il = S_OL; ir = S_OR; ) :
+    t == S_T_ITD  ? ( s_p_itd(st, il, ir);  il = S_OL; ir = S_OR; ) :
+    t == S_T_RESO ? ( s_p_reso(st, il, ir); il = S_OL; ir = S_OR; ) :
+    t == S_T_DOP  ? ( s_p_dop(st, il, ir);  il = S_OL; ir = S_OR; ) :
+    t == S_T_TABLE ? ( s_p_table(st, il, ir); il = S_OL; ir = S_OR; ) :
+    t == S_T_DOM  ? ( s_p_dom(st, il, ir);   il = S_OL; ir = S_OR; ) :
+    t == S_T_XOVER ? ( s_p_xover(st, il, ir); il = S_OL; ir = S_OR; ) :
+    t == S_T_DYN   ? ( s_p_dyn(st, il, ir);   il = S_OL; ir = S_OR; ) :
+    t == S_T_TRANS ? ( s_p_trans(st, il, ir); il = S_OL; ir = S_OR; ) :
+    t == S_T_NOISE ? ( s_p_noise(st, il, ir); il = S_OL; ir = S_OR; ) :
+    ( 0.0 );
+    i += 1.0;
+  );
+  S_OUT_L = il; S_OUT_R = ir;
+);
+
+// ==========================================================================
+// [配置 API] —— 书写顺序 = 信号流顺序
+// ==========================================================================
+// 约定：所有"时间"参数统一用 ms（内部按 srate 换算）；频率用 Hz；增益用线性值。
+//       mod_id = -1 表示该目标不调制。
+// ==========================================================================
+
+// 建立 / 重置一条总线（必须是该总线的第一个调用）
+function s_bus(b, in_gain, ret_m, ret_s) local(sb) (
+  b = max(0.0, min(BUS_MAX - 1.0, floor(b)));
+  sb = S_BUSP + b * S_BUS_STRIDE;
+  sb[S_BUS_IN]  = in_gain;
+  sb[S_BUS_RM]  = ret_m;
+  sb[S_BUS_RS]  = ret_s;
+  sb[S_BUS_STAGES] = 0.0;
+  sb[S_BUS_NPROD]  = 0.0;
+  sb[S_BUS_SRC]    = 0.0;   // 默认：输入 = 节点发送
+  sb[S_BUS_REP]    = 0.0;   // 默认：叠加（发送/返回语义）
+);
+
+// 取下一个 stage 槽（内部用；满则返回 -1，静默丢弃）
+function s_stage(b) local(sb, n) (
+  sb = S_BUSP + b * S_BUS_STRIDE;
+  n = sb[S_BUS_STAGES];
+  n < STAGE_MAX ? (
+    sb[S_BUS_STAGES] = n + 1.0;
+    S_ST + (b * STAGE_MAX + n) * S_STAGE_STRIDE;
+  ) : ( -1.0 );
+);
+
+// set_p_send 定义在 SECTION 2（node_end 之后）：EEL2 要求函数先定义后调用，而节点预设区早于本区。
+
+// ---- TAP ----
+function s_tap_reset() ( S_TAPSET_MAXD = 0.0; );
+function s_tap(i, d_ms, gl, gr, damp_hz, m_amt) local(tp) (
+  i = max(0.0, min(TAP_MAX - 1.0, floor(i)));
+  tp = i * S_TAP_STRIDE;
+  S_TAPSET[tp + S_TAP_D] = max(0.0, d_ms) * 0.001 * srate;
+  S_TAPSET[tp + S_TAP_GL] = gl;
+  S_TAPSET[tp + S_TAP_GR] = gr;
+  S_TAPSET[tp + S_TAP_C] = damp_hz > 0.0 ? 1.0 - exp(-TWO_PI * min(damp_hz, SAFE_SR_LIMIT) * SR_INV) : 0.0;
+  S_TAPSET[tp + S_TAP_M] = m_amt;
+  S_TAPSET[tp + S_TAP_ZAL] = 0.0; S_TAPSET[tp + S_TAP_ZAR] = 0.0;
+  S_TAPSET[tp + S_TAP_ZDL] = 0.0; S_TAPSET[tp + S_TAP_ZDR] = 0.0;
+  S_TAPSET_MAXD = max(S_TAPSET_MAXD, S_TAPSET[tp + S_TAP_D]);
+);
+function s_add_tap(b, n, gs, wet, dry, interp, mod_id, mod_dep)
+local(st, len, k, tbs) (
+  st = s_stage(b);
+  st >= 0.0 ? (
+    n = max(1.0, min(TAP_MAX, floor(n)));
+    len = floor(S_TAPSET_MAXD * S_HR) + 8.0;
+    st[S_ST_TYPE] = S_T_TAP;
+    st[S_ST_BUF]  = s_alloc(len * 2.0);
+    st[S_ST_LEN]  = len;
+    st[S_ST_A0]   = n;
+    tbs = s_sub(st) * TAP_MAX * S_TAP_STRIDE;
+    st[S_ST_A1]   = tbs;
+    k = 0.0;
+    loop(n * S_TAP_STRIDE, S_TAP[tbs + k] = S_TAPSET[k]; k += 1.0; );
+    // 静态抽头预钳：mid<0 时 D 不被调制 → min(len-2,D) 永不触发
+    //   （D ≤ MAXD ≤ floor(MAXD·S_HR) ≤ len-2，S_HR≥1），唯一活钳是 max(1.0)。
+    //   快照后直接钳进 D 槽，运行期零钳制。调制实例（mid>=0）不动。
+    floor(mod_id) < 0.0 ? (
+      k = 0.0;
+      loop(n, S_TAP[tbs + k * S_TAP_STRIDE + S_TAP_D] = max(1.0, S_TAP[tbs + k * S_TAP_STRIDE + S_TAP_D]); k += 1.0; );
+    );
+    st[S_ST_A2] = gs; st[S_ST_A3] = interp;
+    st[S_ST_A4] = max(-1.0, min(MOD_MAX - 1.0, floor(mod_id))); st[S_ST_A5] = mod_dep;
+    st[S_ST_A6] = wet; st[S_ST_A7] = dry;
+  );
+);
+
+// ---- DIFF（配置期展开为 TAP）----
+// density = 每秒抽头数；len_ms = 反射总长；front/back = 首尾幅度（可负=极性）
+// deco = 左右幅度差（去相关量）
+function s_add_diff(b, density, len_ms, seed, front, back, deco, gs, wet, dry, interp, mod_id, mod_dep)
+local(n, i, m, span, t, amp, dpos, mm) (
+  span = max(0.1, len_ms) * 0.001 * srate;
+  n = max(1.0, min(TAP_MAX, floor(max(0.0, density) * max(0.0, len_ms) * 0.001)));
+  // 调制量透传：mod_id >= 0 时 DIFF 抽头可被调制
+  mm = mod_id >= 0.0 ? 1.0 : 0.0;
+  s_tap_reset();
+  i = 0.0;
+  loop(n,
+    m = span / n;
+    dpos = (i + s_hash(seed * 7.13 + i * 1.37)) * m;
+    t = i / max(1.0, n - 1.0);
+    amp = front + (back - front) * t;
+    s_tap(i, dpos * 1000.0 * SR_INV, gs * amp * (1.0 - deco * 0.5), gs * amp * (1.0 + deco * 0.5), 0.0, mm);
+    i += 1.0;
+  );
+  s_add_tap(b, n, 1.0, wet, dry, interp, mod_id, mod_dep);
+);
+
+// ---- LOOP ----
+function s_add_loop(b, d_ms, fb, damp_hz, filt, out_tap, wet, dry, mod_id, mod_dep, detune, xfb, sft)
+local(st, len, c) (
+  st = s_stage(b);
+  st >= 0.0 ? (
+    d_ms = max(0.0, d_ms);
+    len = floor(d_ms * 0.001 * srate * S_HR) + max(64.0, floor(abs(detune)) + 8.0);
+    st[S_ST_TYPE] = S_T_LOOP;
+    st[S_ST_BUF]  = s_alloc(len * 2.0);
+    st[S_ST_LEN]  = len;
+    st[S_ST_A0]   = d_ms * 0.001 * srate;
+    // 交叉反馈的 2x2 反馈矩阵为 [[fb, xfb], [xfb, fb]]，特征值 = fb ± xfb，稳定条件 |fb| + |xfb| < 1。
+    //   因此联合钳制：先定 fb，再按剩余余量定 xfb（各自独立钳制在 fb=0.7 / xfb=0.5 时即自激）。
+    fb = max(-0.98, min(0.98, fb));
+    st[S_ST_A1]   = fb;
+    c = damp_hz > 0.0 ? 1.0 - exp(-TWO_PI * min(damp_hz, SAFE_SR_LIMIT) * SR_INV) : 0.0;
+    st[S_ST_A2]   = max(0.0, min(0.999, c));
+    st[S_ST_A3]   = max(0.0, min(4.0, floor(filt)));  // filt 钳到 [0, 4]
+    st[S_ST_A4]   = max(0.0, min(1.0, out_tap));
+    st[S_ST_A5]   = wet; st[S_ST_A6] = dry;
+    st[S_ST_A7]   = max(-1.0, min(MOD_MAX - 1.0, floor(mod_id))); st[S_ST_A8] = mod_dep;
+    st[S_ST_A9]   = detune;
+    st[S_ST_A10]  = max(-(0.98 - abs(st[S_ST_A1])), min(0.98 - abs(st[S_ST_A1]), xfb));
+    st[S_ST_A11]  = max(0.0, sft);
+    // 无调制读头固化：dl/dr 在环内每样本不变，A12/A13 预钳存（槽空闲；表达式与运行期钳制相同）。
+    //   mid>=0 的实例不写，s_p_loop 按分支走调制路径。
+    floor(mod_id) < 0.0 ? (
+      st[S_ST_A12] = max(1.0, min(st[S_ST_LEN] - 2.0, d_ms * 0.001 * srate));
+      st[S_ST_A13] = max(1.0, min(st[S_ST_LEN] - 2.0, max(1.0, min(st[S_ST_LEN] - 2.0, d_ms * 0.001 * srate)) + detune));
+    );
+  );
+);
+
+// ---- APD ----
+function s_add_apd(b, d_ms, g, ns, wet, dry, mod_id, mod_dep, detune)
+local(st, len) (
+  st = s_stage(b);
+  st >= 0.0 ? (
+    ns = max(1.0, min(16.0, floor(ns)));
+    d_ms = max(0.0, d_ms);
+    len = floor(d_ms * 0.001 * srate * S_HR) + max(64.0, floor(abs(detune)) + 8.0);
+    st[S_ST_TYPE] = S_T_APD;
+    st[S_ST_BUF]  = s_alloc(len * 2.0 * ns);
+    st[S_ST_LEN]  = len;
+    st[S_ST_A0]   = d_ms * 0.001 * srate;
+    st[S_ST_A1]   = max(-0.95, min(0.95, g));
+    st[S_ST_A2]   = ns;
+    st[S_ST_A3]   = max(-1.0, min(MOD_MAX - 1.0, floor(mod_id))); st[S_ST_A4] = mod_dep;
+    st[S_ST_A5]   = wet; st[S_ST_A6] = dry;
+    st[S_ST_A7]   = detune;
+  );
+);
+
+// ---- MOD ----
+function s_add_mod(b, id, wave, rate_hz, depth, phase, spread, env_amt) local(st) (
+  st = s_stage(b);
+  st >= 0.0 ? (
+    st[S_ST_TYPE] = S_T_MOD;
+    st[S_ST_A0] = min(MOD_MAX - 1.0, floor(id));   // 负值 = 关闭（运行侧跳写）
+    st[S_ST_A1] = max(0.0, min(5.0, floor(wave)));
+    st[S_ST_A2] = max(0.0, rate_hz);
+    st[S_ST_A3] = depth;
+    st[S_ST_A4] = phase - floor(phase);
+    st[S_ST_A5] = spread;
+    st[S_ST_A6] = env_amt;
+  );
+);
+
+// ---- FDN ----
+// abs_hz / abs_db：每线吸收滤波器（频变 T60）。abs_db = 高频衰减量 dB（≥0）。
+//   0 dB = 无吸收（默认）；典型 3~12 dB → 高频混响更短。
+//   ⚠ 只允许衰减（|H| ≤ 1）；做 boost 会破坏 FDN 稳定性，故 abs_db 取绝对值。
+function s_fdn_line(i, d_ms, inL, inR, outL, outR, damp_hz, abs_hz, abs_db)
+local(fp, ad) (
+  i = max(0.0, min(FDN_N_MAX - 1.0, floor(i)));
+  fp = i * S_FDN_STRIDE;
+  ad = max(0.0, abs_db);
+  S_FDNSET[fp + S_FDN_D]   = max(0.0, d_ms) * 0.001 * srate;
+  S_FDNSET[fp + S_FDN_INL] = inL; S_FDNSET[fp + S_FDN_INR] = inR;
+  S_FDNSET[fp + S_FDN_OL]  = outL; S_FDNSET[fp + S_FDN_OR] = outR;
+  S_FDNSET[fp + S_FDN_C]   = damp_hz > 0.0 ? 1.0 - exp(-TWO_PI * min(damp_hz, SAFE_SR_LIMIT) * SR_INV) : 0.0;
+  S_FDNSET[fp + S_FDN_Z]   = 0.0; S_FDNSET[fp + S_FDN_WP] = 0.0;
+  // 吸收：g = 10^(-dB/20)；abs_hz <= 0 或 ad <= 0 → g = 1（分支不执行）
+  S_FDNSET[fp + S_FDN_AG] = (abs_hz > 0.0 && ad > 0.0) ? pow(10.0, -ad * 0.05) : 1.0;
+  S_FDNSET[fp + S_FDN_AC] = (abs_hz > 0.0 && ad > 0.0)
+                          ? 1.0 - exp(-TWO_PI * min(abs_hz, SAFE_SR_LIMIT) * SR_INV) : 0.5;
+  S_FDNSET[fp + S_FDN_AZ] = 0.0;
+);
+function s_mtx(i, j, v) (
+  S_MTXSET[floor(i) * FDN_N_MAX + floor(j)] = v;
+);
+// 无穷范数（幂迭代用；向量放在 S_TMP 各总线的 64 槽暂存区）
+function s_vnorm(v, nn) local(k, m) (
+  m = 0.0; k = 0.0;
+  loop(nn, m = max(m, abs(S_TMP[v + k])); k += 1.0; );
+  m;
+);
+// 幂迭代单步：dv <- M*G*sv（G = diag(g_i)，已含各线衰减）
+function s_fdn_mv(mbase, dst, nn, sv, dv) local(j, i, acc) (
+  j = 0.0;
+  loop(nn,
+    acc = 0.0; i = 0.0;
+    loop(nn, acc += S_MTX[mbase + j * nn + i] * S_FDN[dst + i * S_FDN_STRIDE + S_FDN_G] * S_TMP[sv + i]; i += 1.0; );
+    S_TMP[dv + j] = acc; j += 1.0;
+  );
+);
+function s_add_fdn(b, n, t60, damp_hz, matrix, mat_arg, wet, dry, mod_id, mod_dep)
+local(st, nn, k, j, i, dst, src, len, mbase, nb, tt, pw, cw, sw2, gn, rho, tb0, tb1, n0, n1) (
+  st = s_stage(b);
+  st >= 0.0 ? (
+    nn = max(2.0, min(FDN_N_MAX, floor(n)));
+    t60 = max(0.01, t60);
+    st[S_ST_TYPE] = S_T_FDN;
+    st[S_ST_A0] = nn;
+    dst = s_sub(st) * FDN_N_MAX * S_FDN_STRIDE;
+    st[S_ST_A1] = dst;
+    mbase = s_sub(st) * FDN_N_MAX * FDN_N_MAX;
+    st[S_ST_A4] = mbase;
+    st[S_ST_A5] = wet; st[S_ST_A6] = dry;
+    st[S_ST_A7] = max(-1.0, min(MOD_MAX - 1.0, floor(mod_id))); st[S_ST_A8] = mod_dep;
+    st[S_ST_A9] = S_TMP + s_busof(st) * 64.0;   // 运行期 tb 基址（配置期预算；var-as-base：运行期 tb[k]/tb[j] 值即绝对地址，基址必须保留，与 s_add_* 剥基址方向相反）
+    k = 0.0;
+    loop(nn * S_FDN_STRIDE, S_FDN[dst + k] = S_FDNSET[k]; k += 1.0; );
+    k = 0.0;
+    loop(nn,
+      i = dst + k * S_FDN_STRIDE;
+      len = floor(S_FDN[i + S_FDN_D] * S_HR) + 8.0;
+      S_FDN[i + S_FDN_BUF] = s_alloc(len);
+      S_FDN[i + S_FDN_LEN] = len;
+      // g_i = 10^(-3·d_i / (T60·fs))：每线独立衰减，互延时不同的线自然得到不同 T60 分布
+      S_FDN[i + S_FDN_G] = pow(10.0, -3.0 * S_FDN[i + S_FDN_D] / (t60 * srate));
+      S_FDN[i + S_FDN_WP] = 0.0;
+      k += 1.0;
+    );
+    // 反馈矩阵
+    nb = 0.0; tt = 1.0;
+    loop(8.0, tt * 2.0 <= nn ? ( nb += 1.0; tt *= 2.0; ); );
+    // matrix==5 用的 tt 在其分支内部会被清零复用为内层计数器，
+    // 之后每次 (k,j) 都从 0 重来——不能在分支内部再靠 tt 判断"n 是否 2 的幂"。
+    // 在双循环之外先判一次，存进 src（本函数内未被其他分支占用）。此时 tt 仍是
+    // "≤ nn 的最大 2 的幂"，tt==nn 就是 n 本身是 2 的幂。
+    src = (tt == nn) ? 1.0 : 0.0;
+    k = 0.0;
+    loop(nn,
+      j = 0.0;
+      loop(nn,
+        matrix == 0.0 ? ( S_MTX[mbase + k * nn + j] = (k == j ? 1.0 : 0.0) - 2.0 / nn; ) :
+        matrix == 1.0 ? ( S_MTX[mbase + k * nn + j] = (k == j ? 1.0 : 0.0); ) :
+        matrix == 2.0 ? (
+          // 旋转矩阵：分组 2x2 块 (0,1)/(2,3)/... 各自独立转；n 为奇数时落单的最后一行给恒等——对任意 n 都正交
+          //   （相邻线耦合的三对角写法在 n>2 时中间行范数不为 1，不再正交 / 无损）。
+          (k == floor(k * 0.5) * 2.0) ? (
+            (k + 1.0 < nn) ? (
+              S_MTX[mbase + k * nn + j] = (j == k ? cos(mat_arg) : (j == k + 1.0 ? -sin(mat_arg) : 0.0));
+            ) : (
+              S_MTX[mbase + k * nn + j] = (j == k ? 1.0 : 0.0);
+            );
+          ) : (
+            S_MTX[mbase + k * nn + j] = (j == k - 1.0 ? sin(mat_arg) : (j == k ? cos(mat_arg) : 0.0));
+          );
+        ) :
+        // 读步长必须与 s_mtx 的写步长 FDN_N_MAX 一致（用 nn 会在 nn<FDN_N_MAX 时除第 0 行外全部错位读零
+        //   → 用户矩阵 FDN 没有混响尾）
+        matrix == 3.0 ? ( S_MTX[mbase + k * nn + j] = S_MTXSET[k * FDN_N_MAX + j]; ) :
+        matrix == 4.0 ? ( S_MTX[mbase + k * nn + j] = (j == (k + 1.0 - (k + 1.0 >= nn ? nn : 0.0)) ? 1.0 : 0.0); ) :
+        matrix == 5.0 ? (
+          src != 0.0 ? (
+            pw = 1.0; gn = 0.0; tt = 0.0;
+            loop(6.0,
+              cw = floor(k / pw) - 2.0 * floor(k / (pw * 2.0));
+              sw2 = floor(j / pw) - 2.0 * floor(j / (pw * 2.0));
+              gn += cw * sw2;
+              pw *= 2.0; tt += 1.0;
+            );
+            S_MTX[mbase + k * nn + j] = ((gn - 2.0 * floor(gn * 0.5)) != 0.0 ? -1.0 : 1.0) / sqrt(nn);
+          ) : (
+            // n 不是 2 的幂：按文档承诺回落 Householder
+            S_MTX[mbase + k * nn + j] = (k == j ? 1.0 : 0.0) - 2.0 / nn;
+          );
+        ) :
+        ( S_MTX[mbase + k * nn + j] = (k == j ? 1.0 : 0.0) - 2.0 / nn; );
+        j += 1.0;
+      );
+      k += 1.0;
+    );
+    // matrix==3（用户自填矩阵）稳定性兜底。
+    //   FDN 一步迭代为 v <- M*G*v + 输入，稳定需 rho(M*G) < 1。用幂迭代估 rho：
+    //   起始向量由 s_hash 确定性生成 -> 归一化 -> 预热 8 次（不计量，让 v 靠到主导
+    //   特征向量方向上，否则首次迭代的瞬时因子会被平均进来造成欠估）-> 再归一化
+    //   -> 计量 32 次，rho = ||v32||^(1/32)。全程不逐次归一化是刻意的：振荡/复主导
+    //   特征值时包络仍按 |lambda|^N 增长，而逐次归一化需 log 累加（log 不在
+    //   LiveProg 已验证清单内）。正交/亚正交矩阵实测 rho = g < 1 -> 不触发。
+    matrix == 3.0 ? (
+      tb0 = s_busof(st) * 64.0; tb1 = tb0 + nn;
+      k = 0.0;
+      loop(nn, S_TMP[tb0 + k] = s_hash(k * 3.7 + 1.3) * 2.0 - 1.0; k += 1.0; );
+      n0 = s_vnorm(tb0, nn);
+      n0 > 0.0 ? ( k = 0.0; loop(nn, S_TMP[tb0 + k] = S_TMP[tb0 + k] / n0; k += 1.0; ); );
+      k = 0.0;
+      loop(8.0,
+        s_fdn_mv(mbase, dst, nn, tb0, tb1);
+        j = 0.0; loop(nn, S_TMP[tb0 + j] = S_TMP[tb1 + j]; j += 1.0; );
+        k += 1.0;
+      );
+      n0 = s_vnorm(tb0, nn);
+      n0 > 0.0 ? ( k = 0.0; loop(nn, S_TMP[tb0 + k] = S_TMP[tb0 + k] / n0; k += 1.0; ); );
+      k = 0.0;
+      loop(32.0,
+        s_fdn_mv(mbase, dst, nn, tb0, tb1);
+        j = 0.0; loop(nn, S_TMP[tb0 + j] = S_TMP[tb1 + j]; j += 1.0; );
+        k += 1.0;
+      );
+      n1 = s_vnorm(tb0, nn);
+      rho = n1 > 0.0 ? pow(n1, 1.0 / 32.0) : 0.0;
+      rho > 1.0 ? (
+        // 除以 rho×1.03 而不是 rho：除以 rho 恰好把 ρ(M·G) 压到 1.0（稳定边界，不是安全域），
+        // 而 rho 只是 32 步幂迭代的估计值（有限步数 + 起始向量未精确对齐主特征向量），估计偏低时实际 ρ 仍可能 ≥1。
+        // 留 3% 余量，代价是 T60 略短于用户填的值（仅在 matrix==3 且 ρ>1 时触发；正交类矩阵 ρ=g<1 不受影响）。
+        k = 0.0;
+        loop(nn,
+          i = dst + k * S_FDN_STRIDE;
+          S_FDN[i + S_FDN_G] = S_FDN[i + S_FDN_G] / (rho * 1.03);
+          k += 1.0;
+        );
+      );
+    );
+  );
+);
+
+// ---- MSX ----
+function s_add_msx(b, rot, gm, gs, cms, csm, wet, dry) local(st) (
+  st = s_stage(b);
+  st >= 0.0 ? (
+    st[S_ST_TYPE] = S_T_MSX;
+    st[S_ST_A0] = rot; st[S_ST_A1] = gm; st[S_ST_A2] = gs;
+    st[S_ST_A3] = cms; st[S_ST_A4] = csm;
+    st[S_ST_A5] = wet; st[S_ST_A6] = dry;
+  );
+);
+
+// ---- BAND ----
+function s_band(k, fc_hz, width, gain, damp_hz, dly_ms) local(bp, k2) (
+  k = max(0.0, min(BAND_MAX - 1.0, floor(k)));
+  bp = k * S_BAND_STRIDE;
+  S_BANDSET[bp + S_BD_C]   = 1.0 - exp(-TWO_PI * max(20.0, min(fc_hz, SAFE_SR_LIMIT)) * SR_INV);
+  S_BANDSET[bp + S_BD_W]   = width;
+  S_BANDSET[bp + S_BD_G]   = gain;
+  S_BANDSET[bp + S_BD_DC]  = damp_hz > 0.0 ? 1.0 - exp(-TWO_PI * min(damp_hz, SAFE_SR_LIMIT) * SR_INV) : 0.0;
+  S_BANDSET[bp + S_BD_DLY] = max(0.0, dly_ms) * 0.001 * srate;
+  S_BANDSET[bp + S_BD_WP]  = 0.0;
+  S_BANDSET[bp + S_BD_ZDL] = 0.0; S_BANDSET[bp + S_BD_ZDR] = 0.0;
+  // 斜率级联的全部状态槽清零（ord>1 时各级状态都要清）
+  k = 0.0;
+  loop(BAND_ORD_MAX,
+    S_BANDSET[bp + S_BD_ZSL + k] = 0.0; S_BANDSET[bp + S_BD_ZSR + k] = 0.0;
+    k += 1.0;
+  );
+  S_BANDSET[bp + S_BD_GL] = 1.0; S_BANDSET[bp + S_BD_GR] = 1.0;
+);
+// 逐段 pan：L/R 独立增益。默认 1/1（可在 s_band 之后调用覆盖）
+function s_band_pan(k, gl, gr) local(bp) (
+  k = max(0.0, min(BAND_MAX - 1.0, floor(k)));
+  bp = k * S_BAND_STRIDE;
+  S_BANDSET[bp + S_BD_GL] = gl;
+  S_BANDSET[bp + S_BD_GR] = gr;
+);
+// 频段顺序：分频级联为"高→低"，s_band 的分频点必须按降序填写；最后一段是
+//   "低于最后一个分频点的全部残余"，其 fc 参数被忽略（写 0 即可）。
+// ord: 1..BAND_ORD_MAX → 6 / 12 / 18 / 24 dB/oct（望远镜求和，重建仍严格）
+// out_sel: -1 = 各段求和（默认）；0..n-1 = 仅输出该段（配合多总线做多段处理）
+function s_add_band(b, n, ord, out_sel, wet, dry)
+local(st, nb, nord, sel, k, bp, len, dst) (
+  st = s_stage(b);
+  st >= 0.0 ? (
+    nb = max(2.0, min(BAND_MAX, floor(n)));
+    nord = max(1.0, min(BAND_ORD_MAX, floor(ord)));
+    sel = out_sel < 0.0 ? -1.0 : min(nb - 1.0, max(0.0, floor(out_sel)));
+    st[S_ST_TYPE] = S_T_BAND;
+    st[S_ST_A0] = nb;
+    dst = s_sub(st) * BAND_MAX * S_BAND_STRIDE;
+    st[S_ST_A1] = dst;
+    st[S_ST_A6] = wet; st[S_ST_A7] = dry;
+    st[S_ST_A8] = nord; st[S_ST_A9] = sel;
+    k = 0.0;
+    loop(nb * S_BAND_STRIDE, S_BAND[dst + k] = S_BANDSET[k]; k += 1.0; );
+    k = 0.0;
+    loop(nb,
+      bp = dst + k * S_BAND_STRIDE;
+      // 按需分配（与 XOVER 一致）：dly < 1 样本时不占延迟池
+      S_BAND[bp + S_BD_DLY] >= 1.0 ? (
+        len = floor(S_BAND[bp + S_BD_DLY] * S_HR) + 8.0;
+        S_BAND[bp + S_BD_BUF] = s_alloc(len * 2.0);
+        S_BAND[bp + S_BD_LEN] = len;
+      );
+      k += 1.0;
+    );
+  );
+);
+
+// ---- DECO ----
+function s_add_deco(b, n, base_ms, seed, amount, low_hz, wet, dry) local(st, nn, len, bdv) (
+  st = s_stage(b);
+  st >= 0.0 ? (
+    nn = max(1.0, min(DECO_N_MAX, floor(n)));
+    // 先算读头基准 bdv，再由 bdv 推导 len —— 两者必须用同一个 seed 缩放系数（否则 seed>0 时最大读头
+    //   超出缓冲末端被 clamp 钉死：各阶延迟塌成同一值，去相关失效并引入周期梳状）。
+    bdv = max(1.0, base_ms * 0.001 * srate) * (1.0 + max(0.0, min(1.0, seed)) * 0.37);
+    len = floor(bdv * S_HR * (1.0 + nn * 0.75)) + 16.0;
+    st[S_ST_TYPE] = S_T_DECO;
+    st[S_ST_BUF]  = s_alloc(len * 2.0 * nn);
+    st[S_ST_LEN]  = len;
+    st[S_ST_A0] = nn;
+    // seed 按比例缩放整条链的基础延迟：各阶延迟整体改变 → 真正换一套去相关 pattern（只做 + seed*0.5 个样本的偏移是亚样本级，等于没换）。seed 先钳到 [0,1]。
+    st[S_ST_A1] = bdv;
+    st[S_ST_A2] = max(0.0, min(1.0, amount));
+    st[S_ST_A3] = low_hz > 0.0 ? 1.0 - exp(-TWO_PI * min(low_hz, SAFE_SR_LIMIT) * SR_INV) : 0.0;
+    st[S_ST_A5] = wet; st[S_ST_A6] = dry;
+  );
+);
+
+// ---- ITD ----
+function s_add_itd(b, dly_ms_l, dly_ms_r, gain_l, gain_r, wet, dry) local(st, len) (
+  st = s_stage(b);
+  st >= 0.0 ? (
+    dly_ms_l = max(0.0, dly_ms_l); dly_ms_r = max(0.0, dly_ms_r);
+    len = floor(max(dly_ms_l, dly_ms_r) * 0.001 * srate * S_HR) + 8.0;
+    st[S_ST_TYPE] = S_T_ITD;
+    st[S_ST_BUF]  = s_alloc(len * 2.0);
+    st[S_ST_LEN]  = len;
+    st[S_ST_A0] = dly_ms_l * 0.001 * srate;
+    st[S_ST_A1] = dly_ms_r * 0.001 * srate;
+    st[S_ST_A2] = gain_l; st[S_ST_A3] = gain_r;
+    st[S_ST_A5] = wet; st[S_ST_A6] = dry;
+    // dl/dr 静态常量 → 预钳固化 A4/A7（两槽 ITD 从不写；表达式与
+    //   运行期钳制逐字相同）。A5/A6 是 wet/dry，不得占用。
+    st[S_ST_A4] = max(0.0, min(st[S_ST_LEN] - 2.0, dly_ms_l * 0.001 * srate));
+    st[S_ST_A7] = max(0.0, min(st[S_ST_LEN] - 2.0, dly_ms_r * 0.001 * srate));
+  );
+);
+
+// ---- RESO ----
+function s_reso(i, freq, t60, gL, gR, ex, gn_scale) local(mp, w0, r, cw, sw2) (
+  i = max(0.0, min(MODE_MAX - 1.0, floor(i)));
+  mp = i * S_MODE_STRIDE;
+  freq = max(20.0, min(freq, SAFE_SR_LIMIT));
+  t60  = max(0.005, t60);
+  w0 = TWO_PI * freq * SR_INV;
+  r = max(0.0, min(0.999999, pow(10.0, -3.0 / (t60 * srate))));
+  cw = cos(w0); sw2 = sin(w0);
+  S_MODESET[mp + S_RSO_P1] = 2.0 * r * cw;
+  S_MODESET[mp + S_RSO_P2] = -r * r;
+  // 谐振峰单位增益归一化；嫌低频模态弱可把 gn_scale 调大
+  S_MODESET[mp + S_RSO_GN] = sqrt(pow(1.0 - r, 4.0) * cw * cw + pow(1.0 - r * r, 2.0) * sw2 * sw2)
+                           * (gn_scale != 0.0 ? gn_scale : 1.0);
+  S_MODESET[mp + S_RSO_GL] = gL; S_MODESET[mp + S_RSO_GR] = gR;
+  S_MODESET[mp + S_RSO_EX] = max(0.0, min(1.0, ex));
+  S_MODESET[mp + S_RSO_Y1] = 0.0; S_MODESET[mp + S_RSO_Y2] = 0.0;
+);
+function s_add_reso(b, n, wet, dry) local(st, nn, k, dst) (
+  st = s_stage(b);
+  st >= 0.0 ? (
+    nn = max(1.0, min(MODE_MAX, floor(n)));
+    st[S_ST_TYPE] = S_T_RESO;
+    st[S_ST_A0] = nn;
+    dst = s_sub(st) * MODE_MAX * S_MODE_STRIDE;
+    st[S_ST_A1] = dst;
+    st[S_ST_A5] = wet; st[S_ST_A6] = dry;
+    k = 0.0;
+    loop(nn * S_MODE_STRIDE, S_RESO[dst + k] = S_MODESET[k]; k += 1.0; );
+    k = 0.0;
+    loop(nn,
+      S_RESO[dst + k * S_MODE_STRIDE + S_RSO_Y1] = 0.0;
+      S_RESO[dst + k * S_MODE_STRIDE + S_RSO_Y2] = 0.0;
+      k += 1.0;
+    );
+  );
+);
+
+// ---- AIR ----
+function s_add_air(b, dist_m, cutoff_hz, stages, gain, wet, dry) local(st, dd, cut) (
+  st = s_stage(b);
+  st >= 0.0 ? (
+    st[S_ST_TYPE] = S_T_AIR;
+    st[S_ST_A0] = max(0.0, dist_m);
+    st[S_ST_A1] = cutoff_hz;
+    st[S_ST_A2] = max(1.0, min(4.0, floor(stages)));
+    st[S_ST_A3] = gain;
+    st[S_ST_A4] = wet; st[S_ST_A5] = dry;
+    // 预算运行期常量（表达式与 s_p_air 内的原式相同）
+    dd  = st[S_ST_A0];
+    cut = cutoff_hz > 0.0 ? cutoff_hz : 20000.0 * exp(-max(0.0, dd) * 0.05);
+    cut = max(20.0, min(SAFE_SR_LIMIT, cut));
+    st[S_ST_A6] = 1.0 - exp(-TWO_PI * cut * SR_INV);
+    st[S_ST_A7] = gain != 0.0 ? gain : 1.0 / (1.0 + max(0.0, dd) * 0.12);
+  );
+);
+
+// ---- DOP ----
+function s_add_dop(b, base_ms, range_ms, rate_hz, wave, fb, wet, dry, spread) local(st, len) (
+  st = s_stage(b);
+  st >= 0.0 ? (
+    base_ms = max(0.0, base_ms); range_ms = max(0.0, range_ms);
+    len = floor((base_ms + range_ms) * 0.001 * srate * S_HR) + 8.0;
+    st[S_ST_TYPE] = S_T_DOP;
+    st[S_ST_BUF]  = s_alloc(len * 2.0);
+    st[S_ST_LEN]  = len;
+    st[S_ST_A0] = base_ms * 0.001 * srate;
+    st[S_ST_A1] = range_ms * 0.001 * srate;
+    st[S_ST_A2] = rate_hz;
+    st[S_ST_A3] = max(0.0, min(5.0, floor(wave)));
+    st[S_ST_A4] = max(-0.95, min(0.95, fb));
+    st[S_ST_A5] = wet; st[S_ST_A6] = dry;
+    st[S_ST_A7] = spread;
+  );
+);
+
+
+// ---- TABLE ----
+// 逐点填曲线暂存（第 i 点的值 v；表索引覆盖输入 x ∈ [-1,1]）。
+// 用 loop 批量填最方便，例：
+//   i = 0; loop(256, s_curve(i, sin(i * 6.283 / 255)); i += 1; );
+function s_curve(i, v) (
+  S_CURVESET[max(0.0, min(CURVE_N - 1.0, floor(i)))] = v;
+);
+// drive：预缩放（>1 = 更狠）；mode：0=clamp 1=mirror 2=wrap
+// gain：输出增益；dc_hz：>0 时启用输出直流阻断（整形常引入 DC 偏移）
+function s_add_table(b, n, drive, mode, wet, dry, gain, dc_hz)
+local(st, nn, k, cbs) (
+  st = s_stage(b);
+  st >= 0.0 ? (
+    nn = max(2.0, min(CURVE_N, floor(n)));
+    st[S_ST_TYPE] = S_T_TABLE;
+    cbs = s_sub(st) * CURVE_N;
+    st[S_ST_A4] = cbs;
+    st[S_ST_A5] = nn;
+    st[S_ST_A0] = drive;
+    st[S_ST_A1] = max(0.0, min(2.0, floor(mode)));
+    st[S_ST_A2] = wet; st[S_ST_A3] = dry;
+    st[S_ST_A6] = gain;
+    st[S_ST_A7] = dc_hz > 0.0 ? 1.0 - exp(-TWO_PI * min(dc_hz, SAFE_SR_LIMIT) * SR_INV) : 0.0;
+    k = 0.0;
+    loop(nn, S_CURVE[cbs + k] = S_CURVESET[k]; k += 1.0; );
+  );
+);
+
+// ---- MUL ----
+// bias：控制量基线（=1 时 MUL 直通；=0 且只用 mod 时是纯环形调制）
+// mod_id / env_id：-1 = 不用该源；smooth_ms：控制量平滑（0 = 关，防 S&H 跳变 zipper）
+// clamp：>0 时把控制量对称钳到 ±clamp（反馈/极端组合的兜底）
+function s_add_mul(b, bias, mod_id, mod_amt, env_id, env_amt, smooth_ms, clamp, wet, dry)
+local(st) (
+  st = s_stage(b);
+  st >= 0.0 ? (
+    st[S_ST_TYPE] = S_T_MUL;
+    st[S_ST_A0] = bias;
+    st[S_ST_A1] = max(-1.0, min(MOD_MAX - 1.0, floor(mod_id)));
+    st[S_ST_A2] = mod_amt;
+    st[S_ST_A3] = max(-1.0, min(ENV_MAX - 1.0, floor(env_id)));
+    st[S_ST_A4] = env_amt;
+    st[S_ST_A5] = smooth_ms > 0.0 ? s_tconst(smooth_ms) : 0.0;
+    st[S_ST_A6] = max(0.0, clamp);
+    st[S_ST_A7] = wet; st[S_ST_A8] = dry;
+  );
+);
+
+// ---- ENV ----
+// mode: 0=peak 1=RMS；atk_ms / rel_ms：63% 时间常数（atk_ms<=0 = 瞬时起攻，真峰值检波器）
+// rms_win_ms：RMS 窗（仅 mode=1，强制 ≥0.01ms）
+// gain：输出缩放；invert：≠0 → 输出 (1-env)（闪避）；clamp：>0 时钳到 [0, clamp]
+function s_add_env(b, id, mode, atk_ms, rel_ms, rms_win_ms, gain, invert, clamp)
+local(st) (
+  st = s_stage(b);
+  st >= 0.0 ? (
+    st[S_ST_TYPE] = S_T_ENV;
+    st[S_ST_A0] = min(ENV_MAX - 1.0, floor(id));
+    st[S_ST_A1] = max(0.0, min(1.0, floor(mode)));
+    st[S_ST_A2] = s_tconst(atk_ms);
+    st[S_ST_A3] = s_tconst(rel_ms);
+    st[S_ST_A4] = gain;
+    st[S_ST_A5] = invert != 0.0 ? 1.0 : 0.0;
+    st[S_ST_A6] = max(0.0, clamp);
+    // RMS 窗不允许"瞬时"（否则退化为峰值模式），故强制 ≥ 0.01ms
+    st[S_ST_A7] = s_tconst(max(0.01, rms_win_ms));
+  );
+);
+
+// ---- DOM ----
+function s_add_dom(b, mode) local(st) (
+  st = s_stage(b);
+  st >= 0.0 ? (
+    st[S_ST_TYPE] = S_T_DOM;
+    st[S_ST_A0] = mode != 0.0 ? 1.0 : 0.0;
+  );
+);
+
+// ---- 总线主插入（D2）----
+// src: 0=节点发送（默认） 1=主路干声 2=主路湿声 3=主路全声
+// rep: 0=叠加（发送/返回，默认） 1=替换（主插入）
+function s_bus_src(b, src, replace) local(sb) (
+  b = max(0.0, min(BUS_MAX - 1.0, floor(b)));
+  sb = S_BUSP + b * S_BUS_STRIDE;
+  sb[S_BUS_SRC] = max(0.0, min(3.0, floor(src)));
+  sb[S_BUS_REP] = replace != 0.0 ? 1.0 : 0.0;
+);
+
+
+// ---- BQ：cookbook ----
+// type: 0=LP 1=HP 2=BP(恒Q) 3=BP(恒峰值0dB) 4=Notch 5=AP(二阶)
+//       6=Peak 7=LoSelf 8=HiShelf 9=AP(一阶)
+function s_add_bq(b, type, freq, Q, gain_db, wet, dry)
+local(st, w0, cw, sw2, al, a0, A, sq, b0, b1, b2, a1, a2, ty, f, q, S) (
+  st = s_stage(b);
+  st >= 0.0 ? (
+    ty = max(0.0, min(9.0, floor(type)));
+    f  = max(10.0, min(SAFE_SR_LIMIT, freq));
+    q  = max(0.05, min(100.0, Q));
+    w0 = TWO_PI * f * SR_INV; cw = cos(w0); sw2 = sin(w0);
+    al = sw2 * 0.5 / q;
+    A  = pow(10.0, gain_db * 0.025);   // 10^(dB/40)
+    sq = sqrt(A);
+    // 默认 LP 系数，再按类型覆盖
+    b0 = (1.0 - cw) * 0.5; b1 = 1.0 - cw; b2 = (1.0 - cw) * 0.5;
+    a0 = 1.0 + al; a1 = -2.0 * cw; a2 = 1.0 - al;
+    ty == 1.0 ? ( b0 = (1.0 + cw) * 0.5; b1 = -(1.0 + cw); b2 = (1.0 + cw) * 0.5; ) :
+    ty == 2.0 ? ( b0 = al; b1 = 0.0; b2 = -al; ) :
+    ty == 3.0 ? ( b0 = q * al; b1 = 0.0; b2 = -q * al; ) :
+    ty == 4.0 ? ( b0 = 1.0; b1 = -2.0 * cw; b2 = 1.0; ) :
+    ty == 5.0 ? ( b0 = 1.0 - al; b1 = -2.0 * cw; b2 = 1.0 + al; ) :
+    ty == 6.0 ? (
+      al = sw2 * 0.5 / q;
+      b0 = 1.0 + al * A; b1 = -2.0 * cw; b2 = 1.0 - al * A;
+      a0 = 1.0 + al / A; a1 = -2.0 * cw; a2 = 1.0 - al / A;
+    ) : ty == 7.0 ? (
+      // shelf 类型以 Q 充当斜率 S（S 越大过渡越陡）。但根号内 (A+1/A)·(1/S−1)+2 必须 ≥ 0：
+      //   S 偏大 + 增益偏大时会为负 → sqrt 得 NaN。实测临界 S_max 随增益急剧下降
+      //   （+6dB→17.6、+12dB→5.03、+18dB→2.71、+24dB→1.90、+30dB→1.53），
+      //   固定上界 5 在 ≥18dB 处就出 NaN。故上界按增益动态收紧到 inner ≥ 0.05：
+      //     S ≤ 1 / (1 + (0.05 − 2) / (A + 1/A))
+      //   实测 g=6..30dB 全程 inner ≥ 0.05、极点半径 ρ ≤ 0.9939。
+      S = max(0.1, min(5.0, q));
+      S = min(S, 1.0 / max(0.01, 1.0 + (0.05 - 2.0) / (A + 1.0 / A)));
+      al = sw2 * 0.5 * sqrt((A + 1.0 / A) * (1.0 / S - 1.0) + 2.0);
+      b0 = A * ((A + 1.0) - (A - 1.0) * cw + 2.0 * sq * al);
+      b1 = 2.0 * A * ((A - 1.0) - (A + 1.0) * cw);
+      b2 = A * ((A + 1.0) - (A - 1.0) * cw - 2.0 * sq * al);
+      a0 = (A + 1.0) + (A - 1.0) * cw + 2.0 * sq * al;
+      a1 = -2.0 * ((A - 1.0) + (A + 1.0) * cw);
+      a2 = (A + 1.0) + (A - 1.0) * cw - 2.0 * sq * al;
+    ) : ty == 8.0 ? (
+      S = max(0.1, min(5.0, q));   // 同上（含动态上界收紧）
+      S = min(S, 1.0 / max(0.01, 1.0 + (0.05 - 2.0) / (A + 1.0 / A)));
+      al = sw2 * 0.5 * sqrt((A + 1.0 / A) * (1.0 / S - 1.0) + 2.0);
+      b0 = A * ((A + 1.0) + (A - 1.0) * cw + 2.0 * sq * al);
+      b1 = -2.0 * A * ((A - 1.0) + (A + 1.0) * cw);
+      b2 = A * ((A + 1.0) + (A - 1.0) * cw - 2.0 * sq * al);
+      a0 = (A + 1.0) - (A - 1.0) * cw + 2.0 * sq * al;
+      a1 = 2.0 * ((A - 1.0) - (A + 1.0) * cw);
+      a2 = (A + 1.0) - (A - 1.0) * cw - 2.0 * sq * al;
+    ) : ty == 9.0 ? (
+      al = sw2 / (1.0 + cw);          // tan(w0/2)
+      al = (al - 1.0) / (al + 1.0);   // 一阶 AP 系数
+      b0 = al; b1 = 1.0; b2 = 0.0; a0 = 1.0; a1 = al; a2 = 0.0;
+    );
+    st[S_ST_TYPE] = S_T_BQ;
+    st[S_ST_A0] = b0 / a0; st[S_ST_A1] = b1 / a0; st[S_ST_A2] = b2 / a0;
+    st[S_ST_A3] = a1 / a0; st[S_ST_A4] = a2 / a0;
+    st[S_ST_A5] = wet; st[S_ST_A6] = dry;
+  );
+);
+
+// ---- BQ：裸系数 ----
+// stabilize=1 时按极点半径缩放：a1' = a1/ρ、a2' = a2/ρ²（ρ 由判别式解析求得）
+function s_add_userbq(b, b0, b1, b2, a1, a2, wet, dry, stabilize)
+local(st, D, rho, sc2) (
+  st = s_stage(b);
+  st >= 0.0 ? (
+    stabilize != 0.0 ? (
+      D = a1 * a1 - 4.0 * a2;
+      rho = D < 0.0 ? sqrt(max(0.0, a2))
+                    : max(abs((-a1 + sqrt(max(0.0, D))) * 0.5), abs((-a1 - sqrt(max(0.0, D))) * 0.5));
+      rho > 1.0 ? (
+        sc2 = rho * 1.0001;
+        a1 = a1 / sc2; a2 = a2 / (sc2 * sc2);
+      );
+    );
+    st[S_ST_TYPE] = S_T_BQ;
+    st[S_ST_A0] = b0; st[S_ST_A1] = b1; st[S_ST_A2] = b2;
+    st[S_ST_A3] = a1; st[S_ST_A4] = a2;
+    st[S_ST_A5] = wet; st[S_ST_A6] = dry;
+  );
+);
+
+// ---- XOVER ----
+// 填第 i 段：fc = 分频点（末段的 fc 被忽略，写 0 即可）；gl/gr = L/R 增益；dly = 段延迟 ms
+function s_xo(i, fc, gl, gr, dly_ms)
+local(k) (
+  k = max(0.0, min(XO_BAND_MAX - 1.0, floor(i)));
+  S_XOSET[k * S_XO_STRIDE + S_XO_GL]  = gl;
+  S_XOSET[k * S_XO_STRIDE + S_XO_GR]  = gr;
+  S_XOSET[k * S_XO_STRIDE + S_XO_DLY] = max(0.0, dly_ms) * 0.001 * srate;
+  S_XOSET[k * S_XO_STRIDE + 0.0]      = max(0.0, fc);   // 暂借 LB0 存 fc
+);
+// order: 2 = LR2(12dB/oct，HP 反相)  4 = LR4(24dB/oct)
+// ⚠ 分频点间隔 ≥ 3 倍频程才平坦（3-way 1oct → 7.95dB 凹陷，3oct → 0.19dB）
+function s_add_xover(b, n, order, out_sel, wet, dry)
+local(st, nb, k, j, bp, w0, cw, sw2, al, a0, fc, sg, i, tmp, fcs, sel) (
+  st = s_stage(b);
+  st >= 0.0 ? (
+    nb = max(2.0, min(XO_BAND_MAX, floor(n)));
+    sg = order == 2.0 ? -1.0 : 1.0;      // LR2 的 HP 必须反相才功率互补
+    // 段选择：-1 = 各段求和（默认）；0..nb-1 = 仅输出该段
+    sel = out_sel < 0.0 ? -1.0 : min(nb - 1.0, max(0.0, floor(out_sel)));
+    // 分频点升序排序（冒泡，只排前 nb-1 条真分频点）——用户乱序填写也能正确工作。
+    // 末段是最高频段，其 fc 按文档"被忽略，写 0 即可"，不能参与排序（否则那个 0 会被排到最前面，所有分频点整体错位）。
+    // 交换时整条记录（fc / GL / GR / DLY）一起换，否则乱序填写时各段增益 / 延迟与分频点错位。
+    // nb=2 只有 1 个分频点：外层 loop(0) 不执行，本就无需排序。
+    i = 0.0;
+    loop(nb - 2.0,
+      j = 0.0;
+      loop(nb - 2.0 - i,
+        S_XOSET[j * S_XO_STRIDE] > S_XOSET[(j + 1.0) * S_XO_STRIDE] ? (
+          k = 0.0;
+          loop(S_XO_STRIDE,
+            tmp = S_XOSET[j * S_XO_STRIDE + k];
+            S_XOSET[j * S_XO_STRIDE + k] = S_XOSET[(j + 1.0) * S_XO_STRIDE + k];
+            S_XOSET[(j + 1.0) * S_XO_STRIDE + k] = tmp;
+            k += 1.0;
+          );
+        );
+        j += 1.0;
+      );
+      i += 1.0;
+    );
+    bp = s_sub(st) * XO_BAND_MAX * S_XO_STRIDE;
+    st[S_ST_TYPE] = S_T_XOVER;
+    st[S_ST_A0] = nb; st[S_ST_A1] = sg; st[S_ST_A2] = bp;
+    st[S_ST_A3] = wet; st[S_ST_A4] = dry;
+    st[S_ST_A5] = sel;
+    k = 0.0;
+    loop(nb,
+      i = k * S_XO_STRIDE;
+      // 段处理参数
+      S_XO[bp + i + S_XO_GL]  = S_XOSET[k * S_XO_STRIDE + S_XO_GL];
+      S_XO[bp + i + S_XO_GR]  = S_XOSET[k * S_XO_STRIDE + S_XO_GR];
+      S_XO[bp + i + S_XO_DLY] = S_XOSET[k * S_XO_STRIDE + S_XO_DLY];
+      S_XO[bp + i + S_XO_DLY] >= 1.0 ? (
+        S_XO[bp + i + S_XO_LEN] = floor(S_XO[bp + i + S_XO_DLY] * S_HR) + 8.0;
+        S_XO[bp + i + S_XO_BUF] = s_alloc(S_XO[bp + i + S_XO_LEN] * 2.0);
+      );
+      S_XO[bp + i + S_XO_WP] = 0.0;
+      // LP 系数（第 k 个分频点，末段无）
+      (k + 1.0) != nb ? (
+        fc = max(10.0, min(SAFE_SR_LIMIT, S_XOSET[k * S_XO_STRIDE]));
+        w0 = TWO_PI * fc * SR_INV; cw = cos(w0); sw2 = sin(w0);
+        order == 2.0 ? (
+          // 一阶 Butterworth：b2 = a2 = 0
+          al = sw2 / (1.0 + cw);   // K = tan(w0/2)
+          S_XO[bp + i + S_XO_LB0]     = al / (1.0 + al);
+          S_XO[bp + i + S_XO_LB0+1.0] = al / (1.0 + al);
+          S_XO[bp + i + S_XO_LB0+2.0] = 0.0;
+          S_XO[bp + i + S_XO_LB0+3.0] = (al - 1.0) / (1.0 + al);
+          S_XO[bp + i + S_XO_LB0+4.0] = 0.0;
+        ) : (
+          al = sw2 * SQ2_INV;   // Q = 1/√2 → alpha = sin/(2Q) = sin/(√2) = sin·(√2/2)
+          a0 = 1.0 + al;
+          S_XO[bp + i + S_XO_LB0]     = (1.0 - cw) * 0.5 / a0;
+          S_XO[bp + i + S_XO_LB0+1.0] = (1.0 - cw) / a0;
+          S_XO[bp + i + S_XO_LB0+2.0] = (1.0 - cw) * 0.5 / a0;
+          S_XO[bp + i + S_XO_LB0+3.0] = -2.0 * cw / a0;
+          S_XO[bp + i + S_XO_LB0+4.0] = (1.0 - al) / a0;
+        );
+      );
+      // HP 系数（第 k 个分频点，末段无——串行结构的末段直接输出前级剩余）
+      (k + 1.0) != nb ? (
+        fc = max(10.0, min(SAFE_SR_LIMIT, S_XOSET[k * S_XO_STRIDE]));
+        w0 = TWO_PI * fc * SR_INV; cw = cos(w0); sw2 = sin(w0);
+        order == 2.0 ? (
+          al = sw2 / (1.0 + cw);
+          S_XO[bp + i + S_XO_HB0]     = 1.0 / (1.0 + al);
+          S_XO[bp + i + S_XO_HB0+1.0] = -1.0 / (1.0 + al);
+          S_XO[bp + i + S_XO_HB0+2.0] = 0.0;
+          S_XO[bp + i + S_XO_HB0+3.0] = (al - 1.0) / (1.0 + al);
+          S_XO[bp + i + S_XO_HB0+4.0] = 0.0;
+        ) : (
+          // LR4 = 同一个二阶节的平方，HP 的 alpha 必须与 LP 相同（Q=1/√2）；不配对时 LR4 求和会在分频点鼓包。
+          //   实测：2 段求和 0.00dB；3 段(间隔 3 oct) −0.15dB、(间隔 2 oct) −0.74dB；4 段 −0.17dB。
+          al = sw2 * SQ2_INV;
+          a0 = 1.0 + al;
+          S_XO[bp + i + S_XO_HB0]     = (1.0 + cw) * 0.5 / a0;
+          S_XO[bp + i + S_XO_HB0+1.0] = -(1.0 + cw) / a0;
+          S_XO[bp + i + S_XO_HB0+2.0] = (1.0 + cw) * 0.5 / a0;
+          S_XO[bp + i + S_XO_HB0+3.0] = -2.0 * cw / a0;
+          S_XO[bp + i + S_XO_HB0+4.0] = (1.0 - al) / a0;
+        );
+      );
+      k += 1.0;
+    );
+  );
+);
+
+// ---- DYN ----
+// thresh 线性阈值；ratio(≥1)；knee ∈[0,1)；atk/rel ms；rms_ms = 0 时峰值检测
+// makeup 附加增益；gr_id = -1 不输出 GR；g_max > 0 时钳制增益上限
+function s_add_dyn(b, thresh, ratio, knee, atk_ms, rel_ms, rms_ms, makeup, gr_id, g_max, wet, dry)
+local(st) (
+  st = s_stage(b);
+  st >= 0.0 ? (
+    st[S_ST_TYPE] = S_T_DYN;
+    st[S_ST_A0] = max(0.000001, thresh);
+    st[S_ST_A1] = 1.0 / max(1.0, ratio);
+    st[S_ST_A2] = max(0.0, min(0.95, knee));
+    st[S_ST_A3] = s_tconst(atk_ms);
+    st[S_ST_A4] = s_tconst(rel_ms);
+    st[S_ST_A5] = rms_ms > 0.0 ? s_tconst(max(0.01, rms_ms)) : 0.0;
+    st[S_ST_A6] = max(0.0, makeup);
+    st[S_ST_A7] = min(ENV_MAX - 1.0, floor(gr_id));
+    st[S_ST_A8] = max(0.0, g_max);
+    st[S_ST_A9] = wet; st[S_ST_A10] = dry;
+  );
+);
+
+// ---- TRANS ----
+// fast_ms 建议 ≥5（太短会把稳态起伏误判为瞬态）；slow_ms 稳态参考窗
+// atk_amt 瞬态增益量；sus_gain 稳态增益；pos_only=1 只取正部
+// nd_max 瞬态量上限（起振瞬间实测可达 17~86，必须钳）；g_atk/g_rel ms = 增益平滑
+function s_add_trans(b, fast_ms, slow_ms, atk_amt, sus_gain, pos_only, nd_max,
+                     g_atk_ms, g_rel_ms, g_max, wet, dry)
+local(st) (
+  st = s_stage(b);
+  st >= 0.0 ? (
+    st[S_ST_TYPE] = S_T_TRANS;
+    st[S_ST_A0] = s_tconst(max(0.01, fast_ms));
+    st[S_ST_A1] = s_tconst(max(0.01, slow_ms));
+    st[S_ST_A2] = atk_amt;
+    st[S_ST_A3] = sus_gain;
+    st[S_ST_A4] = pos_only != 0.0 ? 1.0 : 0.0;
+    st[S_ST_A5] = max(0.01, nd_max);
+    st[S_ST_A6] = s_tconst(g_atk_ms);
+    st[S_ST_A7] = s_tconst(g_rel_ms);
+    st[S_ST_A8] = max(0.0, g_max);
+    st[S_ST_A9] = wet; st[S_ST_A10] = dry;
+  );
+);
+
+
+// ---- NOISE ----
+// type: 0=白 1=粉 2=棕；level = 输出幅度（粉噪峰值因子约 4.3，默认请开小）
+// brown_hz = 棕噪转折频率（仅 type=2）；wet/dry：默认叠加在输入上（纹理层）
+function s_add_noise(b, type, level, brown_hz, wet, dry)
+local(st, a) (
+  st = s_stage(b);
+  st >= 0.0 ? (
+    st[S_ST_TYPE] = S_T_NOISE;
+    st[S_ST_A0] = max(0.0, min(2.0, floor(type)));
+    st[S_ST_A1] = level;
+    st[S_ST_A2] = 1.0;        // 白噪已是 [-1,1]
+    st[S_ST_A3] = 0.3268;     // 粉噪 RMS 归一化（实测 1/3.06）
+    a = exp(-TWO_PI * max(1.0, min(SAFE_SR_LIMIT, brown_hz)) * SR_INV);
+    st[S_ST_A5] = a;
+    st[S_ST_A4] = sqrt((1.0 + a) / max(0.000001, 1.0 - a));   // 棕噪归一化
+    st[S_ST_A6] = wet; st[S_ST_A7] = dry;
+  );
+);
+
+// ---- ISM：几何设定（三步，顺序无所谓；缺省值 = 5×4×3m 房间 / 居中）----
+function s_ism_room(lx, ly, lz) (
+  S_GEO[G_LX] = max(0.5, lx); S_GEO[G_LY] = max(0.5, ly); S_GEO[G_LZ] = max(0.5, lz);
+);
+function s_ism_src(sx, sy, sz) (
+  S_GEO[G_SX] = sx; S_GEO[G_SY] = sy; S_GEO[G_SZ] = sz;
+);
+function s_ism_rcv(rx, ry, rz) (
+  S_GEO[G_RX] = rx; S_GEO[G_RY] = ry; S_GEO[G_RZ] = rz;
+);
+// bx/by/bz = 各轴反射系数 β ∈ [0,1)（0.7~0.9 典型；越大混响越长）
+function s_ism_wall(bx, by, bz) (
+  S_GEO[G_BX] = max(0.0, min(0.99, bx));
+  S_GEO[G_BY] = max(0.0, min(0.99, by));
+  S_GEO[G_BZ] = max(0.0, min(0.99, bz));
+);
+
+// ---- ISM：生成 TAP ----
+// order ∈ [1,3]（镜像数 26/124/342）；max_t_ms 时间截断；n_taps 取 |g| 最大的前 N 个
+// gs = 总增益；damp_start/decay = 每抽头阻尼（Hz），按反射次数 n 衰减 damp_start·decay^n
+// pan = 立体声方位量(0~1)；norm = 1 时按最大 |g| 归一化
+// ⚠ 源/听者贴近墙角时 1/d 会爆炸（实测最大 9.50）→ 一律 clamp 到 ±1
+// ⚠ 几何声学近似，只在 f > Schroeder 频率 f_s = 2000·√(T60/V) 成立
+function s_ism(b, order, max_t_ms, n_taps, gs, damp_start, decay, pan, norm,
+               wet, dry, interp, mod_id, mod_dep)
+local(st, o, nt, cnt, u, v, w, px, py, pz, dd, tt, gg, nn, ue, ve, we,
+      i, m, bi, bg, bt, gmax, nl, sc) (
+  o  = max(1.0, min(3.0, floor(order)));
+  nt = max(1.0, min(TAP_MAX, floor(n_taps)));
+  // ---- 收集镜像 ----
+  cnt = 0.0;
+  u = 0.0 - o;
+  loop(o * 2.0 + 1.0,
+    v = 0.0 - o;
+    loop(o * 2.0 + 1.0,
+      w = 0.0 - o;
+      loop(o * 2.0 + 1.0,
+        (u == 0.0 && v == 0.0 && w == 0.0) ? ( 0.0 ) : (
+          ue = u - 2.0 * floor(u * 0.5);   // 0 = 偶
+          ve = v - 2.0 * floor(v * 0.5);
+          we = w - 2.0 * floor(w * 0.5);
+          px = u * S_GEO[G_LX] + (ue == 0.0 ? S_GEO[G_SX] : S_GEO[G_LX] - S_GEO[G_SX]);
+          py = v * S_GEO[G_LY] + (ve == 0.0 ? S_GEO[G_SY] : S_GEO[G_LY] - S_GEO[G_SY]);
+          pz = w * S_GEO[G_LZ] + (we == 0.0 ? S_GEO[G_SZ] : S_GEO[G_LZ] - S_GEO[G_SZ]);
+          dd = sqrt((px - S_GEO[G_RX]) * (px - S_GEO[G_RX])
+                  + (py - S_GEO[G_RY]) * (py - S_GEO[G_RY])
+                  + (pz - S_GEO[G_RZ]) * (pz - S_GEO[G_RZ]));
+          tt = dd / SOUND_C;
+          tt <= max_t_ms * 0.001 ? (
+            gg = pow(S_GEO[G_BX], abs(u)) * pow(S_GEO[G_BY], abs(v)) * pow(S_GEO[G_BZ], abs(w))
+               / max(0.1, dd);
+            nn = abs(u) + abs(v) + abs(w);
+            i = cnt * 5.0;
+            S_ISMW[i] = tt; S_ISMW[i + 1.0] = gg; S_ISMW[i + 2.0] = nn;
+            S_ISMW[i + 3.0] = 0.0;                      // 0=候选 1=已选 2=已输出
+            S_ISMW[i + 4.0] = (px - S_GEO[G_RX]) / S_GEO[G_LX];   // 方位 −1..1
+            cnt += 1.0;
+          );
+        );
+        w += 1.0;
+      );
+      v += 1.0;
+    );
+    u += 1.0;
+  );
+  // ---- 归一化基准 ----
+  gmax = 0.0; i = 0.0;
+  loop(cnt, gmax = max(gmax, abs(S_ISMW[i * 5.0 + 1.0])); i += 1.0; );
+  sc = norm != 0.0 ? (gmax > 0.0 ? gs / gmax : gs) : gs;
+  // ---- 按 |g| 取前 nt 个 ----
+  m = 0.0;
+  loop(nt,
+    bg = 0.0; bi = 0.0 - 1.0; i = 0.0;
+    loop(cnt,
+      S_ISMW[i * 5.0 + 3.0] == 0.0 ? (
+        abs(S_ISMW[i * 5.0 + 1.0]) > bg ? ( bg = abs(S_ISMW[i * 5.0 + 1.0]); bi = i; );
+      );
+      i += 1.0;
+    );
+    bi >= 0.0 ? ( S_ISMW[bi * 5.0 + 3.0] = 1.0; m += 1.0; );
+  );
+  // ---- 按时间升序写 tap ----
+  s_tap_reset();
+  nl = 0.0;
+  loop(m,
+    bt = 1.0e9; bi = 0.0 - 1.0; i = 0.0;
+    loop(cnt,
+      S_ISMW[i * 5.0 + 3.0] == 1.0 ? (
+        S_ISMW[i * 5.0] < bt ? ( bt = S_ISMW[i * 5.0]; bi = i; );
+      );
+      i += 1.0;
+    );
+    bi >= 0.0 ? (
+      S_ISMW[bi * 5.0 + 3.0] = 2.0;
+      i = bi * 5.0;
+      gg = S_ISMW[i + 1.0] * sc;
+      gg = max(-1.0, min(1.0, gg));
+      nn = S_ISMW[i + 2.0];
+      dd = max(50.0, min(20000.0, damp_start * pow(max(0.01, decay), nn)));
+      px = max(-1.0, min(1.0, S_ISMW[i + 4.0])) * pan;
+      s_tap(nl, bt * 1000.0, gg * (1.0 - px * 0.5), gg * (1.0 + px * 0.5), dd, 0.0);
+      nl += 1.0;
+    );
+  );
+  s_add_tap(b, nl, 1.0, wet, dry, interp, mod_id, mod_dep);
+);
+
+// ---- ROOMMODES：生成 RESO ----
+// n_modes ≤ MODE_MAX(32)；f_max 最高模态频率（建议 ≈ Schroeder 频率）
+// t60_low / t60_high：按频率线性插值（⚠ 非对数——log 内建不可用，属近似）
+// gain 总增益；spread 立体声宽度；ex 激励混合（0.5 = M 激励）
+// ⚠ 只覆盖 f < f_s 的模态区；高频模态请用 ISM / FDN 的统计式扩散
+function s_roommodes(b, lx, ly, lz, n_modes, f_max, t60_low, t60_high, gain, spread, ex, wet, dry)
+local(st, nm, fm, nx, ny, nz, nxm, nym, nzm, f, cnt, i, k, bestf, besti, used,
+      tt, ax, gl2, gr2, sh, fmin, fmax2) (
+  nm = max(1.0, min(MODE_MAX, floor(n_modes)));
+  fm = max(20.0, min(SAFE_SR_LIMIT, f_max));
+  nxm = min(MODAL_NMAX, floor(2.0 * fm * max(0.5, lx) / SOUND_C));
+  nym = min(MODAL_NMAX, floor(2.0 * fm * max(0.5, ly) / SOUND_C));
+  nzm = min(MODAL_NMAX, floor(2.0 * fm * max(0.5, lz) / SOUND_C));
+  // ---- 枚举候选 ----
+  cnt = 0.0;
+  nx = 0.0;
+  loop(nxm + 1.0,
+    ny = 0.0;
+    loop(nym + 1.0,
+      nz = 0.0;
+      loop(nzm + 1.0,
+        (nx == 0.0 && ny == 0.0 && nz == 0.0) ? ( 0.0 ) : (
+          cnt < ISM_NMAX ? (
+            f = SOUND_C * 0.5 * sqrt((nx / max(0.5, lx)) * (nx / max(0.5, lx))
+                                   + (ny / max(0.5, ly)) * (ny / max(0.5, ly))
+                                   + (nz / max(0.5, lz)) * (nz / max(0.5, lz)));
+            f <= fm ? (
+              i = cnt * 5.0;
+              S_ISMW[i] = f; S_ISMW[i + 1.0] = nx; S_ISMW[i + 2.0] = ny;
+              S_ISMW[i + 3.0] = nz; S_ISMW[i + 4.0] = 0.0;
+              cnt += 1.0;
+            );
+          );
+        );
+        nz += 1.0;
+      );
+      ny += 1.0;
+    );
+    nx += 1.0;
+  );
+  // ---- 频率范围（用于 T60 插值）----
+  fmin = 1.0e9; fmax2 = 0.0; i = 0.0;
+  loop(cnt, fmin = min(fmin, S_ISMW[i * 5.0]); fmax2 = max(fmax2, S_ISMW[i * 5.0]); i += 1.0; );
+  // ---- 取最低的 nm 个 ----
+  k = 0.0;
+  loop(nm,
+    bestf = 1.0e9; besti = 0.0 - 1.0; i = 0.0;
+    loop(cnt,
+      S_ISMW[i * 5.0 + 4.0] == 0.0 ? (
+        S_ISMW[i * 5.0] < bestf ? ( bestf = S_ISMW[i * 5.0]; besti = i; );
+      );
+      i += 1.0;
+    );
+    besti >= 0.0 ? ( S_ISMW[besti * 5.0 + 4.0] = 1.0; k += 1.0; );
+  );
+  // ---- 写 RESO ----
+  i = 0.0; used = 0.0;
+  loop(cnt,
+    S_ISMW[i * 5.0 + 4.0] == 1.0 ? (
+      f  = S_ISMW[i * 5.0];
+      nx = S_ISMW[i * 5.0 + 1.0]; ny = S_ISMW[i * 5.0 + 2.0]; nz = S_ISMW[i * 5.0 + 3.0];
+      // T60 线性插值（近似）
+      tt = t60_low + (t60_high - t60_low)
+         * max(0.0, min(1.0, (f - fmin) / max(0.000001, fmax2 - fmin)));
+      // 模态类型加权：轴向 1.0 / 切向 0.71 / 斜向 0.5
+      ax = (nx > 0.0 ? 1.0 : 0.0) + (ny > 0.0 ? 1.0 : 0.0) + (nz > 0.0 ? 1.0 : 0.0);
+      ax = ax == 1.0 ? 1.0 : (ax == 2.0 ? 0.71 : 0.5);
+      // 立体声：按模态序数哈希给左右差异（确定性）
+      sh = s_hash(nx * 3.1 + ny * 7.7 + nz * 11.3) * 2.0 - 1.0;
+      gl2 = gain * ax * (1.0 + sh * spread * 0.5);
+      gr2 = gain * ax * (1.0 - sh * spread * 0.5);
+      s_reso(used, f, tt, gl2, gr2, ex, 1.0);
+      used += 1.0;
+    );
+    i += 1.0;
+  );
+  s_add_reso(b, used, wet, dry);
+);
+
+// ==========================================================================
+// 初始化收尾：清零已分配的延迟池与全部 stage 状态槽，统计生产者数，固化总线标志位。
+// 必须写在本文件的最后（所有 s_bus / s_add_* 之后）。
+// 作用等价于节点侧的 rebuild_active_list：把"配置"压成采样段可直接吃的扁平量。
+// ==========================================================================
+function s_finalize() local(i, i2, n2, os2, bp, j, b, sb, k, stg, nprod) (
+  i = 0.0;
+  loop(S_ALLOC, S_BUF[i] = 0.0; i += 1.0; );
+  // 包络输出区清零；曲线暂存区清零（重载时不留上次残值）。
+  //   S_CURVE 是已落 stage 的配置数据，不清。
+  i = 0.0;
+  loop(ENV_MAX * 2, S_ENVV[i] = 0.0; i += 1.0; );
+  i = 0.0;
+  loop(CURVE_N, S_CURVESET[i] = 0.0; i += 1.0; );
+  // XOVER 的滤波器状态清零（S_XO 的系数部分是配置数据，不清）
+  k = 0.0;
+  loop(BUS_MAX,
+    j = 0.0;
+    loop(STAGE_MAX,
+      bp = (k * STAGE_MAX + j) * XO_BAND_MAX * S_XO_STRIDE;
+      i2 = 0.0;
+      loop(XO_BAND_MAX,
+        os2 = bp + i2 * S_XO_STRIDE;
+        n2 = 0.0;
+        loop(16.0, S_XO[os2 + S_XO_LS0 + n2] = 0.0; n2 += 1.0; );
+        S_XO[os2 + S_XO_WP] = 0.0;
+        i2 += 1.0;
+      );
+      j += 1.0;
+    );
+    k += 1.0;
+  );
+  BUS_ANY = 0.0;
+  b = 0.0;
+  loop(BUS_MAX,
+    sb = S_BUSP + b * S_BUS_STRIDE;
+    nprod = 0.0;
+    k = 0.0;
+    loop(STAGE_MAX,
+      stg = S_ST + (b * STAGE_MAX + k) * S_STAGE_STRIDE;
+      // 清零只覆盖运行时状态：WP 归零 + Z1..Z19；TYPE/BUF/LEN/A0..A23 保留（A0..A23 是全部 primitive 的配置参数，清掉会使已配置总线输出恒静音）。
+      stg[S_ST_WP] = 0.0;
+      i = S_ST_Z1;
+      loop(S_STAGE_STRIDE - S_ST_Z1, stg[i] = 0.0; i += 1.0; );
+      // 生产者 = MOD 与 ENV（只在音频链之前跑一遍）
+      stg[S_ST_TYPE] == S_T_MOD ? nprod += 1.0;
+      stg[S_ST_TYPE] == S_T_ENV ? nprod += 1.0;
+      k += 1.0;
+    );
+    sb[S_BUS_NPROD] = nprod;
+    S_BUSON[b] = sb[S_BUS_STAGES] != 0.0 ? 1.0 : 0.0;
+    S_BUSIN[b]  = sb[S_BUS_IN];
+    S_BUSSRC[b] = sb[S_BUS_SRC];
+    S_BUSREP[b] = sb[S_BUS_REP];
+    S_RETM[b]   = sb[S_BUS_RM] * 0.5;
+    S_RETS[b]   = sb[S_BUS_RS] * 0.5;
+    BUS_ANY += S_BUSON[b];
+    b += 1.0;
+  );
+);
+
+// ==========================================================================
+// [SECTION 3.6] Spatial Bus 预设区 —— 积木式搭建（默认全关；Substance 房间总线已改为注释备份，见文末）
+// ==========================================================================
+// 用法骨架：
+//   s_bus(总线号, 输入增益, 返回mid增益, 返回side增益);   // 必须是该总线第一个调用
+//   s_add_xxx(总线号, ...);                              // 书写顺序 = 信号流顺序
+//   set_p_send(节点号, 总线号, mid发送量, side发送量);    // 写在 node_begin/node_end 之间
+//   s_finalize();                                        // 必须最后调用
+//
+// 下面给三个可直接解开的例子（都是"房间/空间"语义，不是预设旋钮）：
+//
+// 例 A：近场总线 —— 早期反射 + 空气吸收 + 频段相关宽度
+//   s_bus(0, 1.0, 0.35, 0.35);
+//   s_tap_reset();
+//   s_tap(0,  7.3, 0.9, 0.8, 6500, 0);   // 抽头 i, 延迟ms, 左增益, 右增益, 阻尼Hz, 调制量
+//   s_tap(1, 11.9, -0.6, 0.7, 5200, 0);
+//   s_tap(2, 19.4, 0.5, -0.5, 4200, 0);
+//   s_tap(3, 31.1, 0.35, 0.4, 3400, 0);
+//   s_add_tap(0, 4, 1.0, 1.0, 0.0, 1, -1, 0.0);   // 总线, 抽头数, 总增益, wet, dry, 插值, mod_id, mod_dep
+//   s_add_air(0, 3.5, 0, 2, 0, 1.0, 0.0);          // 距离 3.5m → 自动 HF 衰减
+//   // BAND 的分频级联是"高→低"：第 k 段 = 当前残留 − LP(fc_k)，
+//   //   末段 = 低于最后一个 fc 的全部残余（其 fc 位被忽略）。故分频点必须降序写。
+//   s_band(0, 7000, 1.35, 1.0, 0, 0);              // >7k    加宽
+//   s_band(1, 2200, 1.0,  1.0, 0, 0);              // 2.2k–7k
+//   s_band(2,  180, 0.90, 1.0, 0, 0);              // 180–2.2k
+//   s_band(3,    0, 0.80, 1.0, 0, 0);              // <180   收窄（fc 位忽略）
+//   s_band_pan(0, 1.15, 0.85);                     // 高频段略推左
+//   s_add_band(0, 4, 2, -1, 1.0, 0.0);             // ord=2 → 12dB/oct；-1 = 求和
+//
+// 例 L：真正的多段处理 —— 三段各走一条总线，分别饱和 / 压缩 / 加混响
+//   // 低频段 → 饱和
+//   s_bus(0, 1.0, 1.0, 1.0);
+//   s_xo(0,  160, 1.0, 1.0, 0);
+//   s_xo(1, 1300, 1.0, 1.0, 0);
+//   s_xo(2,    0, 1.0, 1.0, 0);
+//   s_add_xover(0, 3, 4, 0, 1.0, 0.0);             // out_sel=0：只出低频
+//   i = 0; loop(256, x = i*2.0/255.0-1.0; s_curve(i, x/(1.0+abs(x)*3.0)); i += 1; );
+//   s_add_table(0, 256, 1.0, 0, 1.0, 0.0, 1.0, 20);
+//   // 中频段 → 压缩
+//   s_bus(1, 1.0, 1.0, 1.0);
+//   s_add_xover(1, 3, 4, 1, 1.0, 0.0);             // out_sel=1
+//   s_add_dyn(1, 0.25, 4.0, 0.4, 8, 150, 20, 1.0, -1, 0, 1.0, 0.0);
+//   // 高频段 → 混响
+//   s_bus(2, 1.0, 0.5, 0.5);
+//   s_add_xover(2, 3, 4, 2, 1.0, 0.0);             // out_sel=2
+//   s_fdn_line(0, 11.3, 1.0, 0.0, 0.8, 0.6, 7200, 0, 0);
+//   s_fdn_line(1, 14.1, 0.0, 1.0, 0.6, 0.8, 6800, 0, 0);
+//   s_add_fdn(2, 2, 0.6, 6500, 0, 0.0, 1.0, 0.0, -1, 0.0);
+//   // 三条总线的返回各自叠加回主路 = 完整多段链（分频点需一致）
+//
+// 例 B：尾场总线 —— 密度反射 → 真全通扩散 → FDN 混响尾（带调制）
+//   s_bus(1, 1.0, 0.5, 0.7);
+//   s_add_mod(1, 0, 0, 0.31, 1.0, 0.0, 0.37, 0.0);      // 调制源 0：0.31Hz 正弦
+//   s_add_diff(1, 2400, 55, 0.31, 0.2, 1.0, 0.6, 1.0, 1.0, 0.0, 1, -1, 0.0);
+//   s_add_apd(1, 23.7, 0.62, 4, 1.0, 0.0, -1, 0.0, 3.1); // 4 级 Schroeder 全通，L/R detune 3.1 样本
+//   s_fdn_line(0, 29.7, 1.0, 0.0, 0.8, 0.6, 7200);
+//   s_fdn_line(1, 37.1, 0.0, 1.0, 0.6, 0.8, 6800);
+//   s_fdn_line(2, 43.3, 1.0, 0.5, 0.7, 0.7, 6100);
+//   s_fdn_line(3, 51.9, 0.5, 1.0, 0.7, 0.7, 5400);
+//   s_add_fdn(1, 4, 1.6, 6500, 0, 0.0, 1.0, 0.0, -1, 0.0);  // T60 1.6s, Householder 矩阵
+//   s_add_msx(1, 0.0, 1.0, 1.15, 0.0, 0.0, 1.0, 0.0);      // 尾巴稍微拉宽一点
+//
+// 例 C：给节点 3（3kHz 供料）送一份到尾场，节点 4 送一份到近场
+//   set_p_send(3, 1, 0.6, 0.8);
+//   set_p_send(4, 0, 0.3, 0.5);
+//
+// 例 D：主路插入 —— 主路全声 → 任意传输曲线染色（软削波）→ 替换回主路
+//   s_bus(0, 1.0, 1.0, 1.0);
+//   s_bus_src(0, 3, 1);                       // src=3 主路全声，rep=1 替换（插入）
+//   i = 0; loop(256, s_curve(i, i * 2.0 / 255.0 - 1.0); i += 1; );   // 恒等曲线
+//   // 想做软削波就把恒等换成饱和曲线，例：
+//   //   i = 0; loop(256, x = i * 2.0 / 255.0 - 1.0; s_curve(i, x / (1.0 + abs(x) * 2.0)); i += 1; );
+//   s_add_table(0, 256, 1.0, 0, 1.0, 0.0, 1.0, 0);
+//
+// 例 D2：只饱和中置、不动两侧（经典母带手法）——DOM 让既有 primitive 也能作用于 M/S 域
+//   s_bus(0, 1.0, 1.0, 1.0);
+//   s_bus_src(0, 3, 1);
+//   s_add_dom(0, 0);                                   // L/R -> M/S
+//   i = 0; loop(256, x = i * 2.0 / 255.0 - 1.0; s_curve(i, x / (1.0 + abs(x) * 3.0)); i += 1; );
+//   s_add_table(0, 256, 1.0, 0, 1.0, 0.0, 1.0, 20);    // 软削波（同曲线作用于 M 与 S）
+//   s_add_dom(0, 1);                                   // M/S -> L/R
+//
+// 例 E：包络闪避 —— ENV 检出包络 → MUL 反相控制 → 混响尾随输入让路
+//   s_bus(1, 1.0, 0.5, 0.7);
+//   s_add_env(1, 0, 0, 5, 120, 20, 1.0, 1, 0);   // 包络源 0：5ms 起 / 120ms 落，反相
+//   s_add_apd(1, 23.7, 0.62, 4, 1.0, 0.0, -1, 0.0, 3.1);
+//   s_fdn_line(0, 29.7, 1.0, 0.0, 0.8, 0.6, 7200);
+//   s_fdn_line(1, 37.1, 0.0, 1.0, 0.6, 0.8, 6800);
+//   s_add_fdn(1, 2, 1.6, 6500, 0, 0.0, 1.0, 0.0, -1, 0.0);
+//   s_add_mul(1, 0.0, -1, 0.0, 0, 1.0, 30, 0, 1.0, 0.3);  // 控制量 = 0 + 1×ENV(反相)，平滑 30ms
+//
+// 例 F：三段 LR4 分频 → 各段独立混响（分频点间隔 ≥3 倍频程）
+//   s_bus(0, 1.0, 0.4, 0.4);
+//   s_xo(0,  160, 1.0, 1.0, 0);      // 段0：<160Hz
+//   s_xo(1, 1300, 1.0, 1.0, 0);      // 段1：160–1300Hz   （间隔 3.0 oct）
+//   s_xo(2,    0, 1.0, 1.0, 0);      // 段2：>1300Hz      （末段 fc 忽略）
+//   s_add_xover(0, 3, 4, -1, 1.0, 0.0);           // out_sel=-1：各段求和
+//
+// 例 G：DYN 动态 + GR 闪避（压缩器压完的增益直接喂给混响总线做闪避）
+//   s_bus(1, 1.0, 1.0, 1.0);
+//   s_bus_src(1, 3, 1);                                  // 主路插入
+//   s_add_dyn(1, 0.25, 4.0, 0.4, 8, 150, 20, 1.0, 0, 0, 1.0, 0.0);  // GR → S_ENVV[0]
+//   s_add_apd(1, 23.7, 0.62, 4, 1.0, 0.0, -1, 0.0, 3.1);
+//   s_add_mul(1, 0.0, -1, 0.0, 0, 1.0, 40, 0, 1.0, 0.6);  // 混响量随 GR 变化
+//
+// 例 H：TRANS 瞬态设计（fast 用 5ms，别用 1ms）
+//   s_bus(0, 1.0, 1.0, 1.0);
+//   s_add_trans(0, 5, 80, 0.8, 1.0, 1, 1.0, 2, 40, 4.0, 1.0, 0.0);
+//
+// 例 I：BQ 裸系数（自动稳定化）+ cookbook 串联
+//   s_add_userbq(0, 1.0, 0.5, 0.2, -1.9, 0.91, 1.0, 0.0, 1);   // stabilize=1
+//   s_add_bq(0, 6, 3200, 1.2, -4.0, 1.0, 0.0);                  // 峰值衰减
+//
+// 例 J：真实房间 —— 低频用解析模态、中高频用镜像声源早期反射、尾部用 FDN
+//   s_bus(0, 1.0, 0.6, 0.6);
+//   // 1) 低频模态（< Schroeder 频率）
+//   s_roommodes(0, 5.0, 4.0, 3.0, 16, 200, 0.9, 0.5, 0.8, 0.3, 0.5, 1.0, 0.0);
+//   // 2) 早期反射（镜像声源，order=2 → 124 个镜像，取最强的 48 个）
+//   s_ism_room(5.0, 4.0, 3.0);
+//   s_ism_src(2.0, 1.5, 1.2);  s_ism_rcv(3.0, 2.0, 1.5);
+//   s_ism_wall(0.85, 0.80, 0.75);
+//   s_ism(0, 2, 60, 48, 0.9, 7000, 0.75, 0.35, 1, 0.8, 0.0, 1, -1, 0.0);
+//   // 3) 混响尾（FDN，带每线吸收 → 高频 T60 更短）
+//   s_fdn_line(0, 29.7, 1.0, 0.0, 0.8, 0.6, 7200, 3000, 6.0);
+//   s_fdn_line(1, 37.1, 0.0, 1.0, 0.6, 0.8, 6800, 3500, 5.0);
+//   s_fdn_line(2, 43.3, 1.0, 0.5, 0.7, 0.7, 6100, 2800, 7.0);
+//   s_add_fdn(0, 3, 1.6, 6500, 0, 0.0, 1.0, 0.0, -1, 0.0);
+//
+// 例 K：噪声激励混响（测 T60 用）—— 噪声打进 FDN，输出即为房间脉冲响应
+//   s_bus(1, 1.0, 1.0, 0.0);
+//   s_add_noise(1, 0, 0.05, 0, 1.0, 0.0);     // 白噪声，level 开小
+//   s_fdn_line(0, 29.7, 1.0, 0.0, 0.8, 0.6, 7200, 0, 0);
+//   s_add_fdn(1, 1, 1.6, 6500, 0, 0.0, 1.0, 0.0, -1, 0.0);
+//
+// ⚠ 提示：湿路径叠加后更易冲过 0 dBFS —— 记得把 CONST_OUT_LIMIT 设为 1。
+
+// ==========================================================================
+// [备份] Substance v1 房间总线 —— 默认关闭（上一版默认；解注释即可恢复）
+// ⚠ 成本：两条总线合计估算 ~13.7k 单位/样本（Warm Body 全部节点才 ~1.2k）；其中 TAP 级
+//   （ISM 32 抽头 + DIFF 28 抽头）单项就占整份预设总算力的 50%。早期反射 / 扩散叠在
+//   主路上会降低瞬态清晰度（偏糊），
+//   属"新奇"而非"中性耐听"——按需启用，不建议作默认。
+// 两条总线都取"主路全声"（src=3）叠加返回（rep=0）：房间收到的是处理完的整条主路，
+// 总线 1 还会收到总线 0 的早期反射返回 —— 物理上正是"直达 + 早期 → 混响尾"的链路。
+// ==========================================================================
+//
+// ---- 总线 0：近场 —— 早期反射 + 高频去相关 + 距离吸收 + 频段相关宽度 ----
+// ⚠ 第一步高通 90Hz：低频不进房间。实测未高通时 45Hz 房间贡献 +1.9dB（轰），
+//   高通后降到 −0.26dB，且湿路径峰值增益从 ×1.36 降到 ×1.02。
+// s_bus(0, 1.0, 1.15, 1.50);                       // 返回 mid / side（side 更大 = 略宽）
+// s_bus_src(0, 3, 0);                              // src=3 主路全声，rep=0 叠加
+// s_add_bq(0, 1, 90, 0.707, 0.0, 1.0, 0.0);        // 高通 90Hz（1 = HP）
+// s_ism_room(5.2, 4.0, 3.0);                       // 房间 5.2 × 4.0 × 3.0 m
+// s_ism_src(1.8, 1.3, 1.2);                        // 声源位置
+// s_ism_rcv(3.2, 2.2, 1.4);                        // 听者位置
+// s_ism_wall(0.82, 0.78, 0.72);                    // 六面反射系数（均值）
+//   镜像法 → 自动生成 TAP：order=2（124 镜像）取最强 32 个，55ms 内
+// s_ism(0, 2, 55, 32, 0.10, 11000, 0.85, 0.30, 1, 1.0, 0.0, 1, -1, 0.0);
+// s_add_deco(0, 4, 9.0, 0.37, 0.70, 320, 1.0, 0.0); // 高频去相关（低频保持单声道，mono 不塌）
+// s_add_air(0, 4.5, 0, 2, 0, 1.0, 0.0);            // 距离 4.5m → 自动 HF 吸收
+//   BAND 分频级联是"高→低"，分频点必须降序写；末段 fc 被忽略
+// s_band(0, 7000, 1.20, 1.0, 0, 0);                // >7k     加宽
+// s_band(1, 2200, 1.06, 1.0, 0, 0);                // 2.2k–7k 中性
+// s_band(2,  180, 0.95, 1.0, 0, 0);                // 180–2.2k 略收
+// s_band(3,    0, 0.85, 1.0, 0, 0);                // <180    收窄（fc 忽略）
+// s_band_pan(0, 1.05, 0.95);                       // 高频段略推左（实测方位感来源）
+// s_add_band(0, 4, 2, -1, 1.0, 0.0);               // ord=2 → 12dB/oct；-1 = 各段求和
+//
+// ---- 总线 1：尾场 —— 密度反射 → 全通扩散 → FDN 频变 T60（带调制 + 包络闪避）----
+// s_bus(1, 1.0, 0.80, 1.10);
+// s_bus_src(1, 3, 0);
+// s_add_bq(1, 1, 130, 0.707, 0.0, 1.0, 0.0);       // 高通 130Hz：混响不带低频，防浑浊
+// s_add_mod(1, 0, 1, 0.17, 1.0, 0.0, 0.41, 0.0);   // 调制源 0：0.17Hz 三角波
+//   ⚠ wave 选 1（三角）而非 0（正弦）：正弦每样本 2 次 sin，实测 20ns/样本，
+//     三角是纯算术 0.7ns/样本 —— 同样是"让尾巴活起来"，成本差 30 倍。
+// s_add_env(1, 0, 1, 12, 260, 30, 2.2, 1, 1.0);    // 包络源 0：RMS 模式，反相（闪避）
+//   clamp=1.0 很关键：反相后 env 可能超过 1 → 输出转负 → MUL 会反相尾巴。
+// s_add_diff(1, 700, 40, 0.31, 0.18, 1.0, 0.62, 0.06, 1.0, 0.0, 1, 0, 0.5);
+// s_add_apd(1, 24.3, 0.62, 4, 1.0, 0.0, 0, 0.6, 6.5); // 4 级 Schroeder 全通，L/R detune 6.5 样本
+// s_fdn_line(0, 29.7, 1.0, 0.0, 0.8, 0.6, 13000, 3000, 3.5);
+// s_fdn_line(1, 37.1, 0.0, 1.0, 0.6, 0.8, 12000, 2600, 4.0);
+// s_fdn_line(2, 43.3, 1.0, 0.5, 0.7, 0.7, 11000, 2200, 4.5);
+// s_fdn_line(3, 51.9, 0.5, 1.0, 0.7, 0.7,  9500, 1900, 5.0);
+//   末两参数 = 每线吸收滤波器（）：|H| ∈ [g,1] 恒 ≤ 1 → 高频 T60 更短，
+//   物理上就是"地毯/窗帘吸高频"，实测让尾巴不刺耳且不发散。
+// s_add_fdn(1, 4, 0.72, 6500, 0, 0.0, 1.0, 0.0, 0, 0.4);  // T60 0.72s，Householder 无损矩阵
+// s_add_air(1, 5.0, 0, 1, 0, 1.0, 0.0);            // 尾巴再沉一点
+// s_add_mul(1, 0.62, -1, 0.0, 0, 0.38, 70, 0, 1.0, 0.0);  // 控制量 = 0.62 + 0.38×ENV(反相)，平滑 70ms
+//
+// ⚠ 不需要 set_p_send：两条总线都用 src=3（主路全声），发送表不参与。
+// ⚠ 改房间尺寸/反射系数后记得：ISM 的 n_taps ≤ TAP_MAX(64)，order ≤ 3。
+
+s_finalize();
+
+// ==========================================================================
+// [SECTION 4] Atomic Core Processing Engine
+// ==========================================================================
+// [处理引擎] 执行单节点的音频处理，包含均衡、波形塑形、空间扭曲和全通滤波
+// ⚠ 三副本同步纪律（语义镜像，不要求逐字节镜像）——process_engine_atomic（副本 1/3）、
+//    process_engine_atomic_dual 的 Mid 段（副本 2/3）与 Side 段（副本 3/3）。
+//    允许的例外（不属于引擎体，不参与比对）：
+//      * 函数外壳的通道无关参数预取（eq_v1_c1 / eq_g_tpt / eq_v1_c2 / eq_g_tan / flag_global_active）
+//      * 末尾返回目标（单通道 return 表达式 / Mid 写 out_sum_m / Side 写 SIDE_RET）
+//      * 通道状态数组名（st / sat_st / apf_st ↔ st_m,st_s / sat_m,sat_s / apf_m,apf_s）与输入名（in / in_m / in_s）
+//    除上述例外外，任何改动必须三处同步落笔，或回归生成器切片管线重生成。
+//    建议：改动后跑"通道符号归一化 + 预取符号还原 → 文本 diff"的比对脚本，三份应完全一致。
+// 音质声明：sin/cos/tan/exp 保留宿主原生实现，有意不换查表近似——不要"优化"成 LUT。
+function process_engine_atomic(p_offset, in, st, sat_st, apf_st)
+local(p, type, v1, v2, out_sum, tone_high, v1_norm, ax,
+s_i, sat_final, warp_y, tmp_diff,
+st0, st1, st2, sat_st0, sat_st1, sat_st2, sat_st3, sat_st9, sat_st10, sat_st11, sat_st12,
+t_st13, tmp_dry, st3, apf_in, apf_x, apf_y, apf_out, stg, a1, a2,
+v_soft_10, v_soft_02, k, bq_d, st5, st6,
+eq_v1_c1, eq_g_tpt, eq_v1_c2, eq_g_tan, flag_global_active)
+(
+    p = M_P + p_offset;
+    type = p[P_EQ_TYPE];
+
+    // 与 dual 版对齐的 5 项参数预取（单通道下每值仅用一次，收益≈0；
+    // 保留的目的是让三份引擎体文本结构一致，镜像比对脚本才能真正生效）
+    eq_v1_c1 = p[P_EQ_V1_C1];
+    eq_g_tpt = p[P_EQ_G_TPT];
+    eq_v1_c2 = p[P_EQ_V1_C2];
+    eq_g_tan = p[P_EQ_G_TAN];
+    flag_global_active = p[P_FLAG_GLOBAL_ACTIVE];
+
+    in += DENORM_NOISE; // 防 denormal；末尾以 out_sum - DENORM_NOISE 做符号性抵消
+
+    st0 = st[ST_EQ_0]; st1 = st[ST_EQ_1];
+
+    v1 = st0 * eq_v1_c1 + eq_g_tpt * (in - st1);
+    st[ST_EQ_0] = 2.0 * v1 - st0;
+    st[ST_EQ_1] = st1 + eq_v1_c2 * v1;
+    p[P_FLAG_EQ_ACTIVE] != 0.0 ? v2 = st1 + eq_g_tan * v1 : 0.0;
+
+    out_sum = 0.0;
+
+    // [公共预计算] 当任意全局形状/动态处理被激活时，计算归一化信号及绝对值变体
+    flag_global_active != 0.0 ? (
+        v1_norm = v1 * SAFE_B;
+        ax = abs(v1_norm);
+
+        p[P_FLAG_V1_SOFT10] != 0.0 ? v_soft_10 = v1_norm / (1.0 + ax) : 0.0;
+        p[P_FLAG_V1_SOFT02] != 0.0 ? v_soft_02 = v1_norm / (1.0 + ax * 0.2) : 0.0;
+    );
+
+    // [Sharp模块] 对信号做限幅缩放并累加到输出和变量中
+    p[P_SHARP_FINAL] != 0.0 ? out_sum += (v1_norm / (1.0 + ax * SHARP_SOFT_K)) * p[P_SHARP_FINAL] : 0.0;
+
+    st2 = st[ST_COMB_DIFF];
+    st[ST_COMB_DIFF] = v1;
+
+    // [Comb模块] 计算当前与上一次采样的差值，经过软限幅后累加到输出
+    p[P_COMB_FINAL] != 0.0 ? (
+        tmp_diff = (v1 - st2) * p[P_COMB_BASE];
+        out_sum += (tmp_diff / (1.0 + abs(tmp_diff) * 0.5)) * p[P_COMB_FINAL];
+    ) : 0.0;
+
+    // [软塑形组] 根据标记判断，累加基础谐波及波形塑形处理的结果
+    p[P_FLAG_GRP_SOFT] != 0.0 ? (
+        p[P_ODD_FINAL] != 0.0 ? out_sum += v_soft_10 * p[P_ODD_FINAL] : 0;
+        p[P_SQ_FINAL] != 0.0 ? out_sum += (v1_norm / (SQ_DENOM_MIN + ax)) * p[P_SQ_FINAL] * SQ_LEVEL_COMP : 0;
+        p[P_TRI_FINAL] != 0.0 ? out_sum += sin(v1_norm * HALF_PI) * p[P_TRI_FINAL] : 0;
+        p[P_SAW_FINAL] != 0.0 ? out_sum += (v1_norm * exp(-ax * SAW_DECAY_K)) * p[P_SAW_FINAL] : 0;
+        p[P_FOLD_FINAL] != 0.0 ? out_sum += sin(v1_norm * PI) * p[P_FOLD_FINAL] : 0;
+        p[P_FLEX_FINAL] != 0.0 ? out_sum += (v1_norm / (p[P_FLEX_DENOM] + ax * p[P_FLEX_AX_COEF])) * p[P_FLEX_LEVEL_COMP] * p[P_FLEX_FINAL] : 0;
+    );
+
+    // [Dyn模块] 执行动态空间扭曲、限幅平滑和直流偏移过滤，结果累加到输出
+    p[P_DYN_MULT] != 0.0 ? (
+        p[P_FLAG_WARP_ACTIVE] != 0.0 ? (
+            s_i = p[P_SPREAD_AMT] != 0.0 ? (
+                sat_st9 = sat_st[SAT_ST_SPREAD_SMOOTH];
+                sat_st[SAT_ST_SPREAD_SMOOTH] = (sat_st9 += (sat_st[SAT_ST_SPREAD_PREV] - sat_st9) * p[P_SPREAD_COLOR]);
+                v1_norm + max(-2.0, min(2.0, sat_st9)) * p[P_SPREAD_AMT];
+            ) : v1_norm;
+
+            p[P_WARP_H_STRETCH] != 0.0 ? s_i *= (1.0 + abs(s_i) * p[P_WARP_H_STRETCH]) : 0;
+            p[P_WARP_W_WRAP] < 99.0 ? s_i -= p[P_WARP_W_WRAP] * floor(s_i * p[P_WARP_INV_WRAP] + 0.5) : 0;
+
+            sat_final = p[P_FLAG_WARP_FLIP] != 0.0 ? s_i * p[P_WARP_H_FLIP_SIGN] : s_i;
+
+            p[P_WARP_X_SAW] != 0.0 ? (
+                tone_high = sat_final * p[P_WARP_X_SAW];
+                sat_final += (tone_high - floor(tone_high)) * WARP_XSAW_FRAC;
+            ) : 0;
+
+            p[P_SPREAD_AMT] != 0.0 ? sat_st[SAT_ST_SPREAD_PREV] = sat_final : 0;
+
+            p[P_FILTER_MIX] != 0.0 ? (
+                sat_st10 = sat_st[SAT_ST_WARP_Y_PREV_IN]; sat_st11 = sat_st[SAT_ST_WARP_Y_PREV_OUT];
+                warp_y = p[P_FILTER_MIX_TAN] * (sat_final - sat_st11) + sat_st10;
+                sat_st[SAT_ST_WARP_Y_PREV_IN] = sat_final; sat_st[SAT_ST_WARP_Y_PREV_OUT] = warp_y;
+                sat_final += (warp_y - sat_final) * p[P_FILTER_MIX];
+            ) : 0;
+
+            p[P_FILTER_LP_SLOPE] != 0.0 ? (
+                sat_st12 = sat_st[SAT_ST_LP_SMOOTH];
+                sat_st[SAT_ST_LP_SMOOTH] = (sat_st12 += (sat_final + sat_st12 * p[P_FILTER_LP_RES] - sat_st12) * p[P_FILTER_LP_FREQ]);
+                sat_final += (sat_st12 - sat_final) * p[P_FILTER_LP_SLOPE];
+            ) : 0;
+        ) : sat_final = v1_norm;
+
+        p[P_EQ_DAMPING] != 0.0 ? (
+            sat_st1 = sat_st[SAT_ST_DAMP_AX_PREV];
+            sat_st[SAT_ST_DAMP_AX_PREV] = ax;
+            sat_st2 = sat_st[SAT_ST_DAMP_SMOOTH];
+            sat_st[SAT_ST_DAMP_SMOOTH] = (sat_st2 += (abs(ax - sat_st1) - sat_st2) * DAMP_SMOOTH_COEFF);
+            sat_final /= (1.0 + sat_st2 * p[P_EQ_DAMPING]);
+        );
+
+        sat_st3 = sat_st[SAT_ST_DC_OFFSET];
+        sat_st[SAT_ST_DC_OFFSET] = (sat_st3 += (sat_final - sat_st3) * DC_FILTER_COEFF);
+        sat_final -= sat_st3;
+
+        sat_st[SAT_ST_DYN_0] = (sat_st0 = sat_st[SAT_ST_DYN_0] + (sat_final - sat_st[SAT_ST_DYN_0]) * p[P_DYN_SPEED]);
+        out_sum += sat_st0 * p[P_DYN_MULT];
+    );
+
+    // [Hue模块] 将弱软限幅变体按最终增益比例累加到输出
+    p[P_HUE_FINAL] != 0.0 ? out_sum += v_soft_02 * p[P_HUE_FINAL] : 0.0;
+
+    // [Even模块] 对平滑偶次谐波计算干湿信号差值并累加到输出
+    p[P_EVEN_FINAL] != 0.0 ? (
+        tmp_dry = v_soft_10 * v1_norm;
+        st3 = st[ST_EVEN_DRY];
+        st[ST_EVEN_DRY] = (st3 += (tmp_dry - st3) * EVEN_SMOOTH_COEFF);
+        out_sum += (tmp_dry - st3) * p[P_EVEN_FINAL];
+    ) : 0.0;
+
+    // [Tone模块] 将音调平滑处理后的差值结果累加到输出
+    p[P_TONE_FINAL] != 0.0 ? (
+        tmp_dry = v_soft_02;
+        t_st13 = sat_st[SAT_ST_TONE_SMOOTH];
+        sat_st[SAT_ST_TONE_SMOOTH] = (t_st13 += (tmp_dry - t_st13) * p[P_TONE_FREQ_COEFF]);
+        out_sum += (tmp_dry - t_st13) * p[P_TONE_FINAL];
+    ) : 0.0;
+
+    // [APF模块] 对累加和信号执行多级全通滤波并按极性混合输出干湿信号
+    p[P_APF_MIX_ACTIVE] != 0.0 ? (
+        apf_in = out_sum + apf_st[APF_ST_64] * p[P_APF_FB_FF_POS];
+        apf_x = apf_in;
+        stg = p[P_APF_STAGES];
+        a1 = p[P_APF_A1];
+
+        p[P_APF_ORDER2] != 0.0 ? (
+            a2 = p[P_APF_A2];
+            stg == 1 ? (
+                apf_y = a2 * apf_x + apf_st[APF_ST_0];
+                apf_st[APF_ST_0] = a1 * (apf_x - apf_y) + apf_st[APF_ST_1];
+                apf_st[APF_ST_1] = apf_x - a2 * apf_y;
+                apf_x = apf_y;
+            ) : (
+                k = 0;
+                loop(stg,
+                    apf_y = a2 * apf_x + apf_st[k];
+                    apf_st[k] = a1 * (apf_x - apf_y) + apf_st[k+1];
+                    apf_st[k+1] = apf_x - a2 * apf_y;
+                    apf_x = apf_y;
+                    k += 2;
+                );
+            );
+        ) : (
+            stg == 1 ? (
+                apf_y = a1 * apf_x + apf_st[APF_ST_0];
+                apf_st[APF_ST_0] = apf_x - a1 * apf_y;
+                apf_x = apf_y;
+            ) : (
+                k = 0;
+                loop(stg,
+                    apf_y = a1 * apf_x + apf_st[k];
+                    apf_st[k] = apf_x - a1 * apf_y;
+                    apf_x = apf_y;
+                    k += 1;
+                );
+            );
+        );
+
+        apf_st[APF_ST_64] = apf_y;
+        apf_out = apf_y + apf_in * p[P_APF_FB_FF_NEG];
+        out_sum = out_sum * p[P_APF_INV_MIX] + apf_out * p[P_APF_MIX_POL];
+    );
+
+    // [EQ模块] 根据滤波器类型，将SVF或Biquad计算的增益分量累加到输出
+    p[P_EQ_GAIN_K] != 0.0 ? (
+        type <= TYPE_PEAK_SVF ? (
+            out_sum += (type == TYPE_LP ? v2 : (type == TYPE_HP ? in - p[P_EQ_K_DAMP] * v1 - v2 : v1 * p[P_EQ_K_DAMP])) * p[P_EQ_GAIN_K];
+        ) : (
+            st5 = st[ST_BQ_0]; st6 = st[ST_BQ_1];
+            bq_d = p[P_BQ_B0] * in + st5;
+            p[P_BQ_TYPE_5] != 0.0 ? (
+                st[ST_BQ_0] = -p[P_BQ_A1] * bq_d + st6;
+            ) : (
+                st[ST_BQ_0] = p[P_BQ_B1] * in - p[P_BQ_A1] * bq_d + st6;
+            );
+            st[ST_BQ_1] = p[P_BQ_B2] * in - p[P_BQ_A2] * bq_d;
+            out_sum += bq_d * SAFE_B;
+        );
+    ) : 0.0;
+
+    // 注：减去入口注入的 DENORM_NOISE，抵消直接路径的微小直流；
+    // 经状态/非线性路径传播的噪声不会被精确抵消，剩余为极小的负直流偏置，属预期行为。
+    out_sum - DENORM_NOISE;
+);
+
+// [处理引擎·双通道版] mid/side 一次调用合并处理：参数读取/调用开销减半，状态数组各自独立
+// 与"按通道分别调用 process_engine_atomic"逐样本行为一致；
+// 返回值为 mid 通道结果，side 通道结果写入全局 SIDE_RET。
+// ⚠ 引擎体镜像纪律：本函数内 Mid 段与 Side 段是引擎体的两份镜像副本，与
+// process_engine_atomic 三处同步改动（见 SECTION 4 头部纪律）。
+function process_engine_atomic_dual(p_offset, in_m, in_s, st_m, st_s, sat_m, sat_s, apf_m, apf_s)
+local(p, type, v1, v2, out_sum, tone_high, v1_norm, ax,
+s_i, sat_final, warp_y, tmp_diff,
+st0, st1, st2, sat_st0, sat_st1, sat_st2, sat_st3, sat_st9, sat_st10, sat_st11, sat_st12,
+t_st13, tmp_dry, st3, apf_in, apf_x, apf_y, apf_out, stg, a1, a2,
+v_soft_10, v_soft_02, k, bq_d, st5, st6,
+eq_v1_c1, eq_g_tpt, eq_v1_c2, eq_g_tan, flag_global_active, out_sum_m)
+(
+    p = M_P + p_offset;
+    type = p[P_EQ_TYPE];
+
+    // 无条件读取的参数只读一次，mid/side 两段共用
+    eq_v1_c1 = p[P_EQ_V1_C1];
+    eq_g_tpt = p[P_EQ_G_TPT];
+    eq_v1_c2 = p[P_EQ_V1_C2];
+    eq_g_tan = p[P_EQ_G_TAN];
+    flag_global_active = p[P_FLAG_GLOBAL_ACTIVE];
+
+    // ============ Mid 通道（状态：st_m / sat_m / apf_m，输入 in_m）｜引擎体镜像副本 2/3，改动须三处同步 ============
+    in_m += DENORM_NOISE; // 防 denormal
+    st0 = st_m[ST_EQ_0]; st1 = st_m[ST_EQ_1];
+    v1 = st0 * eq_v1_c1 + eq_g_tpt * (in_m - st1);
+    st_m[ST_EQ_0] = 2.0 * v1 - st0;
+    st_m[ST_EQ_1] = st1 + eq_v1_c2 * v1;
+    p[P_FLAG_EQ_ACTIVE] != 0.0 ? v2 = st1 + eq_g_tan * v1 : 0.0;
+    out_sum = 0.0;
+
+    flag_global_active != 0.0 ? (
+        v1_norm = v1 * SAFE_B;
+        ax = abs(v1_norm);
+        p[P_FLAG_V1_SOFT10] != 0.0 ? v_soft_10 = v1_norm / (1.0 + ax) : 0.0;
+        p[P_FLAG_V1_SOFT02] != 0.0 ? v_soft_02 = v1_norm / (1.0 + ax * 0.2) : 0.0;
+    );
+
+    p[P_SHARP_FINAL] != 0.0 ? out_sum += (v1_norm / (1.0 + ax * SHARP_SOFT_K)) * p[P_SHARP_FINAL] : 0.0;
+
+    st2 = st_m[ST_COMB_DIFF];
+    st_m[ST_COMB_DIFF] = v1;
+    p[P_COMB_FINAL] != 0.0 ? (
+        tmp_diff = (v1 - st2) * p[P_COMB_BASE];
+        out_sum += (tmp_diff / (1.0 + abs(tmp_diff) * 0.5)) * p[P_COMB_FINAL];
+    ) : 0.0;
+
+    p[P_FLAG_GRP_SOFT] != 0.0 ? (
+        p[P_ODD_FINAL] != 0.0 ? out_sum += v_soft_10 * p[P_ODD_FINAL] : 0;
+        p[P_SQ_FINAL] != 0.0 ? out_sum += (v1_norm / (SQ_DENOM_MIN + ax)) * p[P_SQ_FINAL] * SQ_LEVEL_COMP : 0;
+        p[P_TRI_FINAL] != 0.0 ? out_sum += sin(v1_norm * HALF_PI) * p[P_TRI_FINAL] : 0;
+        p[P_SAW_FINAL] != 0.0 ? out_sum += (v1_norm * exp(-ax * SAW_DECAY_K)) * p[P_SAW_FINAL] : 0;
+        p[P_FOLD_FINAL] != 0.0 ? out_sum += sin(v1_norm * PI) * p[P_FOLD_FINAL] : 0;
+        p[P_FLEX_FINAL] != 0.0 ? out_sum += (v1_norm / (p[P_FLEX_DENOM] + ax * p[P_FLEX_AX_COEF])) * p[P_FLEX_LEVEL_COMP] * p[P_FLEX_FINAL] : 0;
+    );
+
+    p[P_DYN_MULT] != 0.0 ? (
+        p[P_FLAG_WARP_ACTIVE] != 0.0 ? (
+            s_i = p[P_SPREAD_AMT] != 0.0 ? (
+                sat_st9 = sat_m[SAT_ST_SPREAD_SMOOTH];
+                sat_m[SAT_ST_SPREAD_SMOOTH] = (sat_st9 += (sat_m[SAT_ST_SPREAD_PREV] - sat_st9) * p[P_SPREAD_COLOR]);
+                v1_norm + max(-2.0, min(2.0, sat_st9)) * p[P_SPREAD_AMT];
+            ) : v1_norm;
+
+            p[P_WARP_H_STRETCH] != 0.0 ? s_i *= (1.0 + abs(s_i) * p[P_WARP_H_STRETCH]) : 0;
+            p[P_WARP_W_WRAP] < 99.0 ? s_i -= p[P_WARP_W_WRAP] * floor(s_i * p[P_WARP_INV_WRAP] + 0.5) : 0;
+
+            sat_final = p[P_FLAG_WARP_FLIP] != 0.0 ? s_i * p[P_WARP_H_FLIP_SIGN] : s_i;
+
+            p[P_WARP_X_SAW] != 0.0 ? (
+                tone_high = sat_final * p[P_WARP_X_SAW];
+                sat_final += (tone_high - floor(tone_high)) * WARP_XSAW_FRAC;
+            ) : 0;
+
+            p[P_SPREAD_AMT] != 0.0 ? sat_m[SAT_ST_SPREAD_PREV] = sat_final : 0;
+
+            p[P_FILTER_MIX] != 0.0 ? (
+                sat_st10 = sat_m[SAT_ST_WARP_Y_PREV_IN]; sat_st11 = sat_m[SAT_ST_WARP_Y_PREV_OUT];
+                warp_y = p[P_FILTER_MIX_TAN] * (sat_final - sat_st11) + sat_st10;
+                sat_m[SAT_ST_WARP_Y_PREV_IN] = sat_final; sat_m[SAT_ST_WARP_Y_PREV_OUT] = warp_y;
+                sat_final += (warp_y - sat_final) * p[P_FILTER_MIX];
+            ) : 0;
+
+            p[P_FILTER_LP_SLOPE] != 0.0 ? (
+                sat_st12 = sat_m[SAT_ST_LP_SMOOTH];
+                sat_m[SAT_ST_LP_SMOOTH] = (sat_st12 += (sat_final + sat_st12 * p[P_FILTER_LP_RES] - sat_st12) * p[P_FILTER_LP_FREQ]);
+                sat_final += (sat_st12 - sat_final) * p[P_FILTER_LP_SLOPE];
+            ) : 0;
+        ) : sat_final = v1_norm;
+
+        p[P_EQ_DAMPING] != 0.0 ? (
+            sat_st1 = sat_m[SAT_ST_DAMP_AX_PREV];
+            sat_m[SAT_ST_DAMP_AX_PREV] = ax;
+            sat_st2 = sat_m[SAT_ST_DAMP_SMOOTH];
+            sat_m[SAT_ST_DAMP_SMOOTH] = (sat_st2 += (abs(ax - sat_st1) - sat_st2) * DAMP_SMOOTH_COEFF);
+            sat_final /= (1.0 + sat_st2 * p[P_EQ_DAMPING]);
+        );
+
+        sat_st3 = sat_m[SAT_ST_DC_OFFSET];
+        sat_m[SAT_ST_DC_OFFSET] = (sat_st3 += (sat_final - sat_st3) * DC_FILTER_COEFF);
+        sat_final -= sat_st3;
+
+        sat_m[SAT_ST_DYN_0] = (sat_st0 = sat_m[SAT_ST_DYN_0] + (sat_final - sat_m[SAT_ST_DYN_0]) * p[P_DYN_SPEED]);
+        out_sum += sat_st0 * p[P_DYN_MULT];
+    );
+
+    p[P_HUE_FINAL] != 0.0 ? out_sum += v_soft_02 * p[P_HUE_FINAL] : 0.0;
+
+    p[P_EVEN_FINAL] != 0.0 ? (
+        tmp_dry = v_soft_10 * v1_norm;
+        st3 = st_m[ST_EVEN_DRY];
+        st_m[ST_EVEN_DRY] = (st3 += (tmp_dry - st3) * EVEN_SMOOTH_COEFF);
+        out_sum += (tmp_dry - st3) * p[P_EVEN_FINAL];
+    ) : 0.0;
+
+    p[P_TONE_FINAL] != 0.0 ? (
+        tmp_dry = v_soft_02;
+        t_st13 = sat_m[SAT_ST_TONE_SMOOTH];
+        sat_m[SAT_ST_TONE_SMOOTH] = (t_st13 += (tmp_dry - t_st13) * p[P_TONE_FREQ_COEFF]);
+        out_sum += (tmp_dry - t_st13) * p[P_TONE_FINAL];
+    ) : 0.0;
+
+    p[P_APF_MIX_ACTIVE] != 0.0 ? (
+        apf_in = out_sum + apf_m[APF_ST_64] * p[P_APF_FB_FF_POS];
+        apf_x = apf_in;
+        stg = p[P_APF_STAGES];
+        a1 = p[P_APF_A1];
+        p[P_APF_ORDER2] != 0.0 ? (
+            a2 = p[P_APF_A2];
+            stg == 1 ? (
+                apf_y = a2 * apf_x + apf_m[APF_ST_0];
+                apf_m[APF_ST_0] = a1 * (apf_x - apf_y) + apf_m[APF_ST_1];
+                apf_m[APF_ST_1] = apf_x - a2 * apf_y;
+                apf_x = apf_y;
+            ) : (
+                k = 0;
+                loop(stg,
+                    apf_y = a2 * apf_x + apf_m[k];
+                    apf_m[k] = a1 * (apf_x - apf_y) + apf_m[k+1];
+                    apf_m[k+1] = apf_x - a2 * apf_y;
+                    apf_x = apf_y;
+                    k += 2;
+                );
+            );
+        ) : (
+            stg == 1 ? (
+                apf_y = a1 * apf_x + apf_m[APF_ST_0];
+                apf_m[APF_ST_0] = apf_x - a1 * apf_y;
+                apf_x = apf_y;
+            ) : (
+                k = 0;
+                loop(stg,
+                    apf_y = a1 * apf_x + apf_m[k];
+                    apf_m[k] = apf_x - a1 * apf_y;
+                    apf_x = apf_y;
+                    k += 1;
+                );
+            );
+        );
+        apf_m[APF_ST_64] = apf_y;
+        apf_out = apf_y + apf_in * p[P_APF_FB_FF_NEG];
+        out_sum = out_sum * p[P_APF_INV_MIX] + apf_out * p[P_APF_MIX_POL];
+    );
+
+    p[P_EQ_GAIN_K] != 0.0 ? (
+        type <= TYPE_PEAK_SVF ? (
+            out_sum += (type == TYPE_LP ? v2 : (type == TYPE_HP ? in_m - p[P_EQ_K_DAMP] * v1 - v2 : v1 * p[P_EQ_K_DAMP])) * p[P_EQ_GAIN_K];
+        ) : (
+            st5 = st_m[ST_BQ_0]; st6 = st_m[ST_BQ_1];
+            bq_d = p[P_BQ_B0] * in_m + st5;
+            p[P_BQ_TYPE_5] != 0.0 ? (
+                st_m[ST_BQ_0] = -p[P_BQ_A1] * bq_d + st6;
+            ) : (
+                st_m[ST_BQ_0] = p[P_BQ_B1] * in_m - p[P_BQ_A1] * bq_d + st6;
+            );
+            st_m[ST_BQ_1] = p[P_BQ_B2] * in_m - p[P_BQ_A2] * bq_d;
+            out_sum += bq_d * SAFE_B;
+        );
+    ) : 0.0;
+
+    out_sum_m = out_sum - DENORM_NOISE;
+
+    // ============ Side 通道（状态：st_s / sat_s / apf_s，输入 in_s）｜引擎体镜像副本 3/3，改动须三处同步 ============
+    in_s += DENORM_NOISE; // 防 denormal
+    st0 = st_s[ST_EQ_0]; st1 = st_s[ST_EQ_1];
+    v1 = st0 * eq_v1_c1 + eq_g_tpt * (in_s - st1);
+    st_s[ST_EQ_0] = 2.0 * v1 - st0;
+    st_s[ST_EQ_1] = st1 + eq_v1_c2 * v1;
+    p[P_FLAG_EQ_ACTIVE] != 0.0 ? v2 = st1 + eq_g_tan * v1 : 0.0;
+    out_sum = 0.0;
+
+    flag_global_active != 0.0 ? (
+        v1_norm = v1 * SAFE_B;
+        ax = abs(v1_norm);
+        p[P_FLAG_V1_SOFT10] != 0.0 ? v_soft_10 = v1_norm / (1.0 + ax) : 0.0;
+        p[P_FLAG_V1_SOFT02] != 0.0 ? v_soft_02 = v1_norm / (1.0 + ax * 0.2) : 0.0;
+    );
+
+    p[P_SHARP_FINAL] != 0.0 ? out_sum += (v1_norm / (1.0 + ax * SHARP_SOFT_K)) * p[P_SHARP_FINAL] : 0.0;
+
+    st2 = st_s[ST_COMB_DIFF];
+    st_s[ST_COMB_DIFF] = v1;
+    p[P_COMB_FINAL] != 0.0 ? (
+        tmp_diff = (v1 - st2) * p[P_COMB_BASE];
+        out_sum += (tmp_diff / (1.0 + abs(tmp_diff) * 0.5)) * p[P_COMB_FINAL];
+    ) : 0.0;
+
+    p[P_FLAG_GRP_SOFT] != 0.0 ? (
+        p[P_ODD_FINAL] != 0.0 ? out_sum += v_soft_10 * p[P_ODD_FINAL] : 0;
+        p[P_SQ_FINAL] != 0.0 ? out_sum += (v1_norm / (SQ_DENOM_MIN + ax)) * p[P_SQ_FINAL] * SQ_LEVEL_COMP : 0;
+        p[P_TRI_FINAL] != 0.0 ? out_sum += sin(v1_norm * HALF_PI) * p[P_TRI_FINAL] : 0;
+        p[P_SAW_FINAL] != 0.0 ? out_sum += (v1_norm * exp(-ax * SAW_DECAY_K)) * p[P_SAW_FINAL] : 0;
+        p[P_FOLD_FINAL] != 0.0 ? out_sum += sin(v1_norm * PI) * p[P_FOLD_FINAL] : 0;
+        p[P_FLEX_FINAL] != 0.0 ? out_sum += (v1_norm / (p[P_FLEX_DENOM] + ax * p[P_FLEX_AX_COEF])) * p[P_FLEX_LEVEL_COMP] * p[P_FLEX_FINAL] : 0;
+    );
+
+    p[P_DYN_MULT] != 0.0 ? (
+        p[P_FLAG_WARP_ACTIVE] != 0.0 ? (
+            s_i = p[P_SPREAD_AMT] != 0.0 ? (
+                sat_st9 = sat_s[SAT_ST_SPREAD_SMOOTH];
+                sat_s[SAT_ST_SPREAD_SMOOTH] = (sat_st9 += (sat_s[SAT_ST_SPREAD_PREV] - sat_st9) * p[P_SPREAD_COLOR]);
+                v1_norm + max(-2.0, min(2.0, sat_st9)) * p[P_SPREAD_AMT];
+            ) : v1_norm;
+
+            p[P_WARP_H_STRETCH] != 0.0 ? s_i *= (1.0 + abs(s_i) * p[P_WARP_H_STRETCH]) : 0;
+            p[P_WARP_W_WRAP] < 99.0 ? s_i -= p[P_WARP_W_WRAP] * floor(s_i * p[P_WARP_INV_WRAP] + 0.5) : 0;
+
+            sat_final = p[P_FLAG_WARP_FLIP] != 0.0 ? s_i * p[P_WARP_H_FLIP_SIGN] : s_i;
+
+            p[P_WARP_X_SAW] != 0.0 ? (
+                tone_high = sat_final * p[P_WARP_X_SAW];
+                sat_final += (tone_high - floor(tone_high)) * WARP_XSAW_FRAC;
+            ) : 0;
+
+            p[P_SPREAD_AMT] != 0.0 ? sat_s[SAT_ST_SPREAD_PREV] = sat_final : 0;
+
+            p[P_FILTER_MIX] != 0.0 ? (
+                sat_st10 = sat_s[SAT_ST_WARP_Y_PREV_IN]; sat_st11 = sat_s[SAT_ST_WARP_Y_PREV_OUT];
+                warp_y = p[P_FILTER_MIX_TAN] * (sat_final - sat_st11) + sat_st10;
+                sat_s[SAT_ST_WARP_Y_PREV_IN] = sat_final; sat_s[SAT_ST_WARP_Y_PREV_OUT] = warp_y;
+                sat_final += (warp_y - sat_final) * p[P_FILTER_MIX];
+            ) : 0;
+
+            p[P_FILTER_LP_SLOPE] != 0.0 ? (
+                sat_st12 = sat_s[SAT_ST_LP_SMOOTH];
+                sat_s[SAT_ST_LP_SMOOTH] = (sat_st12 += (sat_final + sat_st12 * p[P_FILTER_LP_RES] - sat_st12) * p[P_FILTER_LP_FREQ]);
+                sat_final += (sat_st12 - sat_final) * p[P_FILTER_LP_SLOPE];
+            ) : 0;
+        ) : sat_final = v1_norm;
+
+        p[P_EQ_DAMPING] != 0.0 ? (
+            sat_st1 = sat_s[SAT_ST_DAMP_AX_PREV];
+            sat_s[SAT_ST_DAMP_AX_PREV] = ax;
+            sat_st2 = sat_s[SAT_ST_DAMP_SMOOTH];
+            sat_s[SAT_ST_DAMP_SMOOTH] = (sat_st2 += (abs(ax - sat_st1) - sat_st2) * DAMP_SMOOTH_COEFF);
+            sat_final /= (1.0 + sat_st2 * p[P_EQ_DAMPING]);
+        );
+
+        sat_st3 = sat_s[SAT_ST_DC_OFFSET];
+        sat_s[SAT_ST_DC_OFFSET] = (sat_st3 += (sat_final - sat_st3) * DC_FILTER_COEFF);
+        sat_final -= sat_st3;
+
+        sat_s[SAT_ST_DYN_0] = (sat_st0 = sat_s[SAT_ST_DYN_0] + (sat_final - sat_s[SAT_ST_DYN_0]) * p[P_DYN_SPEED]);
+        out_sum += sat_st0 * p[P_DYN_MULT];
+    );
+
+    p[P_HUE_FINAL] != 0.0 ? out_sum += v_soft_02 * p[P_HUE_FINAL] : 0.0;
+
+    p[P_EVEN_FINAL] != 0.0 ? (
+        tmp_dry = v_soft_10 * v1_norm;
+        st3 = st_s[ST_EVEN_DRY];
+        st_s[ST_EVEN_DRY] = (st3 += (tmp_dry - st3) * EVEN_SMOOTH_COEFF);
+        out_sum += (tmp_dry - st3) * p[P_EVEN_FINAL];
+    ) : 0.0;
+
+    p[P_TONE_FINAL] != 0.0 ? (
+        tmp_dry = v_soft_02;
+        t_st13 = sat_s[SAT_ST_TONE_SMOOTH];
+        sat_s[SAT_ST_TONE_SMOOTH] = (t_st13 += (tmp_dry - t_st13) * p[P_TONE_FREQ_COEFF]);
+        out_sum += (tmp_dry - t_st13) * p[P_TONE_FINAL];
+    ) : 0.0;
+
+    p[P_APF_MIX_ACTIVE] != 0.0 ? (
+        apf_in = out_sum + apf_s[APF_ST_64] * p[P_APF_FB_FF_POS];
+        apf_x = apf_in;
+        stg = p[P_APF_STAGES];
+        a1 = p[P_APF_A1];
+        p[P_APF_ORDER2] != 0.0 ? (
+            a2 = p[P_APF_A2];
+            stg == 1 ? (
+                apf_y = a2 * apf_x + apf_s[APF_ST_0];
+                apf_s[APF_ST_0] = a1 * (apf_x - apf_y) + apf_s[APF_ST_1];
+                apf_s[APF_ST_1] = apf_x - a2 * apf_y;
+                apf_x = apf_y;
+            ) : (
+                k = 0;
+                loop(stg,
+                    apf_y = a2 * apf_x + apf_s[k];
+                    apf_s[k] = a1 * (apf_x - apf_y) + apf_s[k+1];
+                    apf_s[k+1] = apf_x - a2 * apf_y;
+                    apf_x = apf_y;
+                    k += 2;
+                );
+            );
+        ) : (
+            stg == 1 ? (
+                apf_y = a1 * apf_x + apf_s[APF_ST_0];
+                apf_s[APF_ST_0] = apf_x - a1 * apf_y;
+                apf_x = apf_y;
+            ) : (
+                k = 0;
+                loop(stg,
+                    apf_y = a1 * apf_x + apf_s[k];
+                    apf_s[k] = apf_x - a1 * apf_y;
+                    apf_x = apf_y;
+                    k += 1;
+                );
+            );
+        );
+        apf_s[APF_ST_64] = apf_y;
+        apf_out = apf_y + apf_in * p[P_APF_FB_FF_NEG];
+        out_sum = out_sum * p[P_APF_INV_MIX] + apf_out * p[P_APF_MIX_POL];
+    );
+
+    p[P_EQ_GAIN_K] != 0.0 ? (
+        type <= TYPE_PEAK_SVF ? (
+            out_sum += (type == TYPE_LP ? v2 : (type == TYPE_HP ? in_s - p[P_EQ_K_DAMP] * v1 - v2 : v1 * p[P_EQ_K_DAMP])) * p[P_EQ_GAIN_K];
+        ) : (
+            st5 = st_s[ST_BQ_0]; st6 = st_s[ST_BQ_1];
+            bq_d = p[P_BQ_B0] * in_s + st5;
+            p[P_BQ_TYPE_5] != 0.0 ? (
+                st_s[ST_BQ_0] = -p[P_BQ_A1] * bq_d + st6;
+            ) : (
+                st_s[ST_BQ_0] = p[P_BQ_B1] * in_s - p[P_BQ_A1] * bq_d + st6;
+            );
+            st_s[ST_BQ_1] = p[P_BQ_B2] * in_s - p[P_BQ_A2] * bq_d;
+            out_sum += bq_d * SAFE_B;
+        );
+    ) : 0.0;
+
+    SIDE_RET = out_sum - DENORM_NOISE;
+    out_sum_m; // 返回 Mid 结果
+);
+
+// ==========================================================================
+// [SECTION 5] Runtime Processing
+// ==========================================================================
 @sample
-spl0 = spl0;
-spl1 = spl1;
+m_o = (spl0 + spl1) * M_HALF_IG;
+s_o = (spl0 - spl1) * M_HALF_IG;
+sum_m_effects = 0.0;
+sum_s_effects = 0.0;
+// 空间总线输入累加器（BUS_ANY = 0 时整段跳过）
+BUS_ANY != 0.0 ? (
+    sb_i = 0;
+    loop(BUS_MAX, S_BM[sb_i] = 0.0; S_BS[sb_i] = 0.0; sb_i += 1; );
+);
+
+m_work = m_o * SAFE_A;
+s_work = s_o * SAFE_A;
+
+// 三表分流：节点类别（dual / mid-only / side-only）与全部基址、权重均在 rebuild_active_list 内一次性固化。
+// 采样段三个循环体内零分支、零 p[] 权重读取、零基址加法。M_ACTIVE 完整表仅供调试读取；实际处理走下面三张表。
+j = 0;
+loop(DUAL_COUNT,
+    sb_d_m = process_engine_atomic_dual(
+        M_DUAL[j], m_work, s_work,
+        M_DUAL_STM[j], M_DUAL_STS[j],
+        M_DUAL_SAT[j], M_DUAL_SAT[j] + CH_OFFSET,
+        M_DUAL_APF[j], M_DUAL_APF[j] + CH_OFFSET
+    );
+    sum_m_effects += sb_d_m * M_DUAL_WM[j];
+    sum_s_effects += SIDE_RET * M_DUAL_WS[j];
+    BUS_NEED_SEND != 0.0 ? (
+        sb_i = 0;
+        loop(BUS_MAX,
+            S_BM[sb_i] += sb_d_m * M_DUAL_SMM[j * BUS_MAX + sb_i];
+            S_BS[sb_i] += SIDE_RET * M_DUAL_SMS[j * BUS_MAX + sb_i];
+            sb_i += 1;
+        );
+    );
+    j += 1;
+);
+
+j = 0;
+loop(MID_COUNT,
+    sb_d_m = process_engine_atomic(
+        M_MID[j], m_work, M_MID_ST[j], M_MID_SAT[j], M_MID_APF[j]
+    );
+    sum_m_effects += sb_d_m * M_MID_W[j];
+    BUS_NEED_SEND != 0.0 ? (
+        sb_i = 0;
+        loop(BUS_MAX,
+            S_BM[sb_i] += sb_d_m * M_MID_SM[j * BUS_MAX + sb_i];
+            sb_i += 1;
+        );
+    );
+    j += 1;
+);
+
+j = 0;
+loop(SIDE_COUNT,
+    sb_d_m = process_engine_atomic(
+        M_SIDE[j], s_work, M_SIDE_ST[j], M_SIDE_SAT[j], M_SIDE_APF[j]
+    );
+    sum_s_effects += sb_d_m * M_SIDE_W[j];
+    BUS_NEED_SEND != 0.0 ? (
+        sb_i = 0;
+        loop(BUS_MAX,
+            S_BS[sb_i] += sb_d_m * M_SIDE_SS[j * BUS_MAX + sb_i];
+            sb_i += 1;
+        );
+    );
+    j += 1;
+);
+
+FLAG_WIDTH != 0.0 ? sum_s_effects *= WIDTH_MUL;
+
+mid_raw = m_o + sum_m_effects;
+side_raw = s_o + sum_s_effects;
+
+// ---- 空间总线：节点发送 → 总线 primitive 链 → 返回 mid/side ----
+// 返回量已含 ×0.5（在 s_finalize 内固化），故此处只是两次加法。
+BUS_ANY != 0.0 ? (
+    sb_i = 0;
+    loop(BUS_MAX,
+        S_BUSON[sb_i] != 0.0 ? (
+            // 输入源选择：0=节点发送（默认）1=主路干声 2=主路湿声 3=主路全声
+            //   src=0（默认）时仅 1 次比较 + 2 次加/减
+            sb_src = S_BUSSRC[sb_i];
+            sb_l = sb_src == 0.0 ? (S_BM[sb_i] + S_BS[sb_i])
+                 : sb_src == 1.0 ? (m_o + s_o)
+                 : sb_src == 2.0 ? (sum_m_effects + sum_s_effects)
+                                 : (mid_raw + side_raw);
+            sb_r = sb_src == 0.0 ? (S_BM[sb_i] - S_BS[sb_i])
+                 : sb_src == 1.0 ? (m_o - s_o)
+                 : sb_src == 2.0 ? (sum_m_effects - sum_s_effects)
+                                 : (mid_raw - side_raw);
+            s_run_bus(sb_i, sb_l * S_BUSIN[sb_i], sb_r * S_BUSIN[sb_i]);
+            // 返回模式：0=叠加（默认）1=替换（主插入）
+            S_BUSREP[sb_i] != 0.0 ? (
+                mid_raw  = (S_OUT_L + S_OUT_R) * S_RETM[sb_i];
+                side_raw = (S_OUT_L - S_OUT_R) * S_RETS[sb_i];
+            ) : (
+                mid_raw  += (S_OUT_L + S_OUT_R) * S_RETM[sb_i];
+                side_raw += (S_OUT_L - S_OUT_R) * S_RETS[sb_i];
+            );
+        );
+        sb_i += 1;
+    );
+);
+
+FLAG_PHASE != 0.0 ? (
+    ap_m_out = PHASE_COEFF * mid_raw + M_AP[0];
+    M_AP[0] = mid_raw - PHASE_COEFF * ap_m_out + DENORM_NOISE;
+
+    ap_s_out = PHASE_COEFF * side_raw + M_AP[1];
+    M_AP[1] = side_raw - PHASE_COEFF * ap_s_out + DENORM_NOISE;
+
+    FLAG_GAIN != 0.0 ? (
+        spl0 = (ap_m_out + ap_s_out) * O_G;
+        spl1 = (ap_m_out - ap_s_out) * O_G;
+    ) : (
+        spl0 = ap_m_out + ap_s_out;
+        spl1 = ap_m_out - ap_s_out;
+    );
+) : (
+    FLAG_GAIN != 0.0 ? (
+        spl0 = (mid_raw + side_raw) * O_G;
+        spl1 = (mid_raw - side_raw) * O_G;
+    ) : (
+        spl0 = mid_raw + side_raw;
+        spl1 = mid_raw - side_raw;
+    );
+);
+
+// 可选输出软限幅：默认 CONST_OUT_LIMIT = 0.0（关闭）。
+// 多节点叠加 + 高 res/fb_ff/dyn_mult 时可能冲过 0 dBFS，需要兜底时把它设为 1。
+// 启用空间总线后强烈建议设为 1：湿路径（尤其 FDN / LOOP / RESO）会持续累加能量，返回增益稍大就会顶到 0 dBFS 以上。
+CONST_OUT_LIMIT != 0.0 ? (
+    // 只用 abs 构造的软饱和（不依赖 tanh —— EEL2 核心内建表中无 tanh，
+    // JamesDSP 的 EEL_VM 是否注册未确认，未定义函数在编译期即可能失败）。
+    // 小信号近线性、大信号单调饱和到 ±1/0.5 = ±2.0；系数 0.5 可按口味调整。
+    spl0 = spl0 / (1.0 + abs(spl0) * 0.5);
+    spl1 = spl1 / (1.0 + abs(spl1) * 0.5);
+);
