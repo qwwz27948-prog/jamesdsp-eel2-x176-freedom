@@ -1,1 +1,14 @@
-PLACEHOLDER_WILL_FAIL
+Desc: X176 Freedom — Warm Body（去纸感 · 体量 · 耐听）
+author: Coolk & contributors
+version: X176 Freedom 1.8.41 (Warm Body v1)
+
+// FULL SCRIPT PENDING - temporary stub while uploading complete file
+// Please replace with full content from release artifacts.
+
+@init
+// stub
+
+@sample
+// stub - passthrough
+spl0 = spl0;
+spl1 = spl1;
