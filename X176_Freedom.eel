@@ -2,13 +2,15 @@ Desc: X176 Freedom — Warm Body（去纸感 · 体量 · 耐听）
 author: Coolk & contributors
 version: X176 Freedom 1.8.41 (Warm Body v1)
 
-// FULL SCRIPT PENDING - temporary stub while uploading complete file
-// Please replace with full content from release artifacts.
+// ==========================================================================
+// 注意：当前仓库中的此文件为占位符。
+// 完整脚本约 200KB，请从本机 artifacts 或维护者提供的完整版替换上传。
+// 完整版包含：4 节点并行引擎 + Warm Body 默认调音 + 可选空间总线。
+// ==========================================================================
 
 @init
-// stub
+// placeholder — replace with full 1.8.41 Warm Body script before use
 
 @sample
-// stub - passthrough
 spl0 = spl0;
 spl1 = spl1;
