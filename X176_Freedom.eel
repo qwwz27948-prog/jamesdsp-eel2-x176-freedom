@@ -14,8 +14,9 @@ version: X176 Freedom 1.8.41 (Warm Body v1)
 //   · 中性、耐听，不追一耳鲜
 //   · 默认不开空间总线（算力约 1.25k 单位/样本）
 //
-// 兼容：
-//   · JamesDSP（Android，含 RootlessJamesDSP）
+// 目标宿主（请按具体宿主版本验证；本仓库未附带统一的宿主集成测试报告）：
+//   · JamesDSP Liveprog（Android）
+//   · RootlessJamesDSP
 //   · JDSP4Linux / JamesDSP for Linux
 //
 // 安装：
@@ -1233,8 +1234,9 @@ M_SIDE_SS  = M_MID_SM   + MAX_NODES * BUS_MAX;       // side-only 节点 → 总
 // 相位级状态显式清零：不再依赖宿主对未初始化槽的清零行为
 M_AP[0] = 0.0; M_AP[1] = 0.0;
 
-// ⚠⚠⚠ 初始化收尾线：任何 node_begin / set_p_* / set_p_ms 都必须写在本行之前 ⚠⚠⚠
+// ⚠⚠⚠ 初始化收尾线：任何 node_begin / set_p_* / set_p_ms / set_p_send 都必须写在本行之前 ⚠⚠⚠
 // 写在下面的节点配置不会进入采样段处理列表（参数写进去了，但静默失效）。
+// 注意：set_p_send 还会影响下面的 BUS_NEED_SEND 预扫描；太晚设置会使发送路径继续被跳过。
 rebuild_active_list();
 // 发送量检测：S_SND 全零（无 set_p_send）时采样段整段跳过 send 累加。
 //   阈值 0.00001 与 EEL2 '!=' 的 1e-5 容差语义对齐；清零循环不受影响（src=0 时
@@ -3309,7 +3311,8 @@ function s_finalize() local(i, i2, n2, os2, bp, j, b, sb, k, stg, nprod) (
 //   set_p_send(节点号, 总线号, mid发送量, side发送量);    // 写在 node_begin/node_end 之间
 //   s_finalize();                                        // 必须最后调用
 //
-// 下面给三个可直接解开的例子（都是"房间/空间"语义，不是预设旋钮）：
+// 以下为配置示例（都是"房间/空间"语义，不是预设旋钮）。
+// ⚠ 解除注释前必须核对每个例子的前置条件与配置顺序，不要不加检查地整段启用。
 //
 // 例 A：近场总线 —— 早期反射 + 空气吸收 + 频段相关宽度
 //   s_bus(0, 1.0, 0.35, 0.35);
@@ -3330,6 +3333,9 @@ function s_finalize() local(i, i2, n2, os2, bp, j, b, sb, k, stg, nprod) (
 //   s_add_band(0, 4, 2, -1, 1.0, 0.0);             // ord=2 → 12dB/oct；-1 = 求和
 //
 // 例 L：真正的多段处理 —— 三段各走一条总线，分别饱和 / 压缩 / 加混响
+// ⚠ 本例使用总线 0、1、2。当前 BUS_MAX=2 仅有总线 0、1；必须先在上方规模常量区将
+//   BUS_MAX 改为至少 3 并重新加载。否则 s_bus(2,...) 会被钳到总线 1，重置/覆盖中频总线。
+//   增加总线会改变内存分配与运行成本，启用前须重新检查内存上限并测量性能。
 //   // 低频段 → 饱和
 //   s_bus(0, 1.0, 1.0, 1.0);
 //   s_xo(0,  160, 1.0, 1.0, 0);
@@ -3363,6 +3369,9 @@ function s_finalize() local(i, i2, n2, os2, bp, j, b, sb, k, stg, nprod) (
 //   s_add_msx(1, 0.0, 1.0, 1.15, 0.0, 0.0, 1.0, 0.0);      // 尾巴稍微拉宽一点
 //
 // 例 C：给节点 3（3kHz 供料）送一份到尾场，节点 4 送一份到近场
+// ⚠ 不要在本示例所在位置直接启用下列调用。请将它们复制到上方节点配置区，放在
+//   对应 node_begin()/节点参数设置之后、rebuild_active_list() 之前；本例中的总线配置
+//   也必须在 s_finalize() 之前完成。
 //   set_p_send(3, 1, 0.6, 0.8);
 //   set_p_send(4, 0, 0.3, 0.5);
 //
