@@ -1,0 +1,1246 @@
+"""x176_eel_tools —— X176 Freedom 项目的 EEL2 转译 / 静态检查 / 测量 / 代码等价比对 / A-B 对拍工具（单文件）
+作者：Claude AI；1.1.0 起 GLM AI(Srosx) 参与维护（登记见 X176维护者署.txt，编号 1）
+
+用法（测量需要 python3 + numpy；compile / lint / samecode 不需要 numpy）：
+  python x176_eel_tools.py check    项目.txt [--jobs N] [--strict] [--mem N]
+        # lint + 编译 + 初始化 + 频响(mid/side) + THD + 单声道 + 稳定性；有问题时退出码为 1
+  python x176_eel_tools.py lint     项目.txt            # 只做静态检查（不运行，约 1 秒）；有 ERROR 时退出码为 1
+  python x176_eel_tools.py samecode 旧.txt 新.txt [--blocks N]
+        # 逐 token 比对两个文件的代码（忽略注释 / 空白 / 文件头）；不等价时给出差异块个数、行号与摘要
+  python x176_eel_tools.py ab       旧.txt 新.txt [--tol X]
+        # 同一组测试信号喂给两个文件，逐样本对拍输出（逐位一致 / 最大差 / 相对 RMS 差）
+  python x176_eel_tools.py compile   项目.txt 输出.py [--strict]   # 只转译，得到可 import 的 Python 模块
+  python x176_eel_tools.py --version
+也可 import 使用：Project(path).run(L, R)；impulse_response / resp / thd / samecode / lint / abtest。
+
+选项：--jobs N  check 的并行进程数（默认：CPU 核数，最多 4；1 = 串行；多进程不可用时自动退回串行）
+      --strict  每次读写内存数组都检查下标范围，越界立即报出所在函数（在 1.8.41 上实测约慢 40%；排查配置期 / 地址计算错误用）
+      --mem N   内存数组格数（默认 700000；项目槽位顶端超出时调大）
+
+转译器的 EEL2 语义（带 ★ 的为 2026-10-17 真机探针 P01-P12 落锤项；其余为待验证假设）：
+  ★除以 0 → ±inf、0/0 → NaN（真机 P07/P08：大数且非零；有限大数还是 inf 待探针 P16/P17 细分）；
+  ★% → 绝对值式 |fmod(a,b)|（真机 P04-P06：-7%3 ∉ {-1,2}、7%-3 ≠ -2，排除 C 式与 Python 式；
+    非整数细分待探针 P13-P15；%0 与 inf/nan 操作数未探、兜 0）；
+  ★local() 跨调用持久（真机 P01）——1.0.1 误作每次调用清零，1.1.0 起编译为函数专属持久槽；
+  ★数字词法不吞符号：1e-9 按 1.0-9.0 解析（真机 P11 实锤；转译器已同步模拟，lint 仍报 ERROR 双保险）；
+  == / != 容差 1e-5；条件判真 |x| > 1e-5；sqrt 取 |x|；
+  ★数组下标正小数向下取整（真机 P03：a[698.5] 读到 a[698] 的写入值）。
+  不支持：while、位运算(& |)、字符串、this/instance、$pi 之类的 $ 常量。
+
+lint 的规则（宿主会判文件损坏 / 静默错值的写法；其中"先定义后调用"与"带符号指数"就是项目 1.8.40 修过的两处事故）：
+  ERROR  段落标记 / 裸 @ 字符个数异常或顺序不对；带符号的指数写法（1e-9 在宿主里是 1.0-9.0）；
+         函数在定义之前被调用（EEL2 先定义后调用）；未知 / 未注册的内建函数；语法错误；
+         用户函数参数个数与定义不符（这是本脚本无法运行的写法；宿主是否允许没有核对）
+  WARN   函数重复定义；全局变量只读不写（可能是拼写错误）
+
+维护记录（新的写在最下面；署名写法与项目文件头 author 行一致）：
+  v1     2026-10-03  Claude AI                首版：转译器 + check + samecode + compile
+  1.0.1  2026-10-04  Claude AI（Sonnet 5.5）  见下
+    · 新增 lint 静态检查（define-before-use / 带符号指数 / 参数个数 / 段落标记 / 只读变量 / 重复定义），check 先跑它
+    · 新增 ab 对拍（codify 逐位对拍工作流）；samecode 不等价时给出差异块个数、行号与摘要（原来只报第一处）
+    · 新增 --strict 内存越界检测、--mem；运行期异常转成带函数名的 EelRuntimeError（原来是裸 Python 回溯）
+    · 提速：编译结果缓存（check 要建 8 个 Project，原先每个都重新转译，约占总时间 17%）；输入改用 Python 浮点列表；
+      check 的 7 项测量可多进程并行；转译时初始化段只解析 1 遍（原来 2 遍）。输出数值与 v1 逐位一致
+    · 修复：%= 原先走 Python 浮点 %（与 % 的整数语义不一致）；sin/cos/tan 遇 inf 直接崩溃（改返回 nan）；
+      samecode 在不等价时丢弃段落标记告警；缺 / 错序的段落标记给出明确报错；采样段里写 function 给出明确报错；
+      频点附近无频率 bin 时 resp 返回 nan（改取最近 bin）
+    · 新增 /* */ 块注释支持；语法错误带行号与列号；不支持的语法（while / 位运算 / $ 常量 / 字符串）给出明确提示
+    · numpy 改为按需导入：compile / lint / samecode 不再依赖 numpy
+  1.1.0  2026-10-17  GLM AI(Srosx)          真机语义探针 P01-P12 落锤对齐（Coolk 真机回传 12 位，6 分叉全修）：
+    · local() 跨调用持久（P01）——改为函数专属持久槽 v_<fn>__<name>，模块装配时一次性清零，不再每次调用清零
+    · % 改绝对值式 |fmod(a,b)|（P04-P06 排除 C 式 / Python 式；非整数与 %0 细分待探针 P13-P15）
+    · 除零改 IEEE ±inf / NaN（P07/P08：大数且非零；有限 vs 无穷待 P16/P17）
+    · 转译器同步模拟毒词法：1e-9 → 1.0-9.0（P11 实锤；lint ERROR 保留为双保险，检测改为跨 token 序列）
+    · 验证：12 探针镜像位表与真机回传逐位相等 [1,1,1,0,0,0,1,0,1,1,1,1]；1.8.41
+      R4_Clean↔Maintain(D 版) ab 36000 样本逐位一致（行为保持）；check 数字与 1.0.1 对账；samecode 复核 D 版零代码改动
+"""
+import re, sys, os, time, difflib
+
+__version__ = '1.1.0'
+
+try:
+    import numpy as np
+except ImportError:  # compile / lint / samecode 不需要 numpy
+    np = None
+
+MEMSIZE = 700000
+_FN = '<eel>'          # 转译代码的伪文件名；用来从回溯里认出"转译出来的函数"
+
+
+def _need_np():
+    if np is None:
+        raise SystemExit('这个功能需要 numpy：pip install numpy')
+
+
+def _read(path):
+    with open(path, encoding='utf-8-sig') as f:
+        return f.read()
+
+
+# =====================================================================
+#  词法
+# =====================================================================
+TOK = re.compile(r'''
+  (?P<ws>\s+)
+ |(?P<num>(?:\d+\.\d*|\.\d+|\d+)(?:[eE]\d*)?)
+ |(?P<id>[A-Za-z_][A-Za-z0-9_]*)
+ |(?P<op>==|!=|<=|>=|&&|\|\||\+=|-=|\*=|/=|%=|[-+*/%^<>=!?:;,()\[\]&|])
+''', re.X)
+
+_CMT = re.compile(r'//[^\n]*|/\*.*?\*/', re.S)
+_BADCH = {'$': '不支持 $pi / $e 等常量', '"': '不支持字符串', "'": '不支持字符串 / 字符常量', '{': '不支持花括号，语句块用括号',
+          '}': '不支持花括号，语句块用括号', '~': '不支持 ~ 运算', '.': '不支持带点的名字（this. / instance）',
+          '@': '代码里不允许出现 @（段落标记之外的 @ 会让宿主判文件损坏）', '#': '不支持 # 记号', '\\': '不支持反斜杠'}
+
+
+def _blank(m):
+    return re.sub(r'[^\n]', ' ', m.group(0))     # 注释换成空白，保留换行 → 行号不变
+
+
+def tokenize_pos(src, line0=1):
+    """返回 [(kind, text, 行号)]；注释（// 与 /* */）按空白处理。"""
+    src = _CMT.sub(_blank, src)
+    out, pos, line, n = [], 0, line0, len(src)
+    while pos < n:
+        m = TOK.match(src, pos)
+        if not m:
+            col = pos - (src.rfind('\n', 0, pos) + 1) + 1
+            ln = line0 + src.count('\n', 0, pos)
+            raise SyntaxError('第 %d 行第 %d 列：不支持的字符 %r（%s）；附近：%r' % (
+                ln, col, src[pos], _BADCH.get(src[pos], '见"适用范围"'), ' '.join(src[max(0, pos - 30):pos + 30].split())))
+        k = m.lastgroup
+        txt = m.group(k)
+        pos = m.end()
+        if k == 'ws':
+            line += txt.count('\n')
+            continue
+        out.append((k, txt, line))
+    return out
+
+
+def tokenize(src):
+    return [(k, t) for k, t, _ in tokenize_pos(src)]
+
+
+def split_sections(src):
+    """返回 (初始化段源码, 其起始行号, 采样段源码, 其起始行号)；缺标记 / 顺序不对时抛 SyntaxError。"""
+    if '@init' not in src:
+        raise SyntaxError('找不到初始化段标记')
+    if '@sample' not in src:
+        raise SyntaxError('找不到采样段标记')
+    i0, i1 = src.index('@init'), src.index('@sample')
+    if i1 < i0:
+        raise SyntaxError('采样段标记出现在初始化段标记之前')
+    return (src[i0 + 5:i1], src.count('\n', 0, i0 + 5) + 1,
+            src[i1 + 7:], src.count('\n', 0, i1 + 7) + 1)
+
+
+def _prep(sec_src, line0):
+    t3 = tokenize_pos(sec_src, line0)
+    return [(k, t) for k, t, _ in t3], [ln for _, _, ln in t3]
+
+
+# =====================================================================
+#  语法
+# =====================================================================
+class Parser:
+    def __init__(self, toks, lines=None):
+        self.t = toks
+        self.lines = lines
+        self.i = 0
+        self.func_lines = {}
+
+    def where(self, i=None):
+        if not self.lines:
+            return ''
+        i = self.i if i is None else i
+        return '第 %d 行：' % self.lines[min(max(i, 0), len(self.lines) - 1)]
+
+    def ctx(self):
+        return ' '.join(t for _, t in self.t[max(0, self.i - 12):self.i + 6])
+
+    def peek(self):
+        return self.t[self.i] if self.i < len(self.t) else ('eof', '')
+
+    def nxt(self):
+        x = self.peek()
+        self.i += 1
+        return x
+
+    def isop(self, v):
+        k, t = self.peek()
+        return k == 'op' and t == v
+
+    def accept(self, v):
+        if self.isop(v):
+            self.i += 1
+            return True
+        return False
+
+    def expect(self, v):
+        if not self.accept(v):
+            raise SyntaxError('%s期望 %r，实际遇到 %r；附近：%s' % (self.where(), v, self.peek()[1] or '文件结尾', self.ctx()))
+
+    # ---------------- expressions
+    def seq(self, terms):
+        items = []
+        while True:
+            while self.accept(';'):
+                pass
+            k, t = self.peek()
+            if k == 'eof' or (k == 'op' and t in terms):
+                break
+            items.append(self.assign())
+            if not self.accept(';'):
+                break
+        return ('seq', items)
+
+    def assign(self):
+        left = self.ternary()
+        k, t = self.peek()
+        if k == 'op' and t in ('=', '+=', '-=', '*=', '/=', '%='):
+            self.i += 1
+            right = self.assign()
+            return ('assign', t, left, right)
+        return left
+
+    def ternary(self):
+        c = self.lor()
+        if self.accept('?'):
+            a = self.assign()
+            b = None
+            if self.accept(':'):
+                b = self.assign()
+            return ('tern', c, a, b)
+        return c
+
+    def lor(self):
+        l = self.land()
+        while self.accept('||'):
+            l = ('or', l, self.land())
+        return l
+
+    def land(self):
+        l = self.eq()
+        while self.accept('&&'):
+            l = ('and', l, self.eq())
+        return l
+
+    def eq(self):
+        l = self.rel()
+        while True:
+            if self.accept('=='):
+                l = ('bin', '==', l, self.rel())
+            elif self.accept('!='):
+                l = ('bin', '!=', l, self.rel())
+            else:
+                return l
+
+    def rel(self):
+        l = self.add()
+        while True:
+            for op in ('<=', '>=', '<', '>'):
+                if self.accept(op):
+                    l = ('bin', op, l, self.add())
+                    break
+            else:
+                return l
+
+    def add(self):
+        l = self.mul()
+        while True:
+            if self.accept('+'):
+                l = ('bin', '+', l, self.mul())
+            elif self.accept('-'):
+                l = ('bin', '-', l, self.mul())
+            else:
+                return l
+
+    def mul(self):
+        l = self.unary()
+        while True:
+            if self.accept('*'):
+                l = ('bin', '*', l, self.unary())
+            elif self.accept('/'):
+                l = ('bin', '/', l, self.unary())
+            elif self.accept('%'):
+                l = ('bin', '%', l, self.unary())
+            else:
+                return l
+
+    def unary(self):
+        if self.accept('-'):
+            return ('neg', self.unary())
+        if self.accept('+'):
+            return self.unary()
+        if self.accept('!'):
+            return ('not', self.unary())
+        return self.pw()
+
+    def pw(self):
+        l = self.primary()
+        if self.accept('^'):
+            return ('bin', '^', l, self.unary())
+        return l
+
+    def primary(self):
+        k, t = self.nxt()
+        ln = self.lines[min(self.i - 1, len(self.lines) - 1)] if self.lines else 0
+        if k == 'num':
+            if t[-1] in 'eE':          # 裸 e：词法器数字 token 不吞符号（真机探针 P11 实锤），
+                t = t[:-1]             # "1e-9" 会切成 num(1e) op(-) num(9)，值按 1.0-9.0 = -8
+            return ('num', float(t))
+        if k == 'id':
+            if t == 'while':
+                raise SyntaxError('%s不支持 while（只支持 loop()）；附近：%s' % (self.where(self.i - 1), self.ctx()))
+            if self.isop('('):
+                self.i += 1
+                args = []
+                if not self.accept(')'):
+                    while True:
+                        a = self.seq({',', ')'})
+                        args.append(a[1][0] if len(a[1]) == 1 else a)
+                        if self.accept(','):
+                            continue
+                        self.expect(')')
+                        break
+                return ('call', t, args, ln)
+            node = ('var', t)
+            if self.isop('['):
+                self.i += 1
+                off = self.seq({']'})
+                self.expect(']')
+                off = off[1][0] if len(off[1]) == 1 else off
+                return ('idx', node, off)
+            return node
+        if k == 'op' and t == '(':
+            s = self.seq({')'})
+            self.expect(')')
+            return s[1][0] if len(s[1]) == 1 else s
+        hint = '（不支持位运算 & |）' if t in ('&', '|') else ''
+        raise SyntaxError('%s意外的记号 %r%s；附近：%s' % (self.where(self.i - 1), t or '文件结尾', hint, self.ctx()))
+
+    # ---------------- top level
+    def toplevel(self):
+        funcs, stmts = [], []
+        while self.peek()[0] != 'eof':
+            if self.accept(';'):
+                continue
+            if self.peek() == ('id', 'function'):
+                fline = self.lines[min(self.i, len(self.lines) - 1)] if self.lines else 0
+                self.i += 1
+                name = self.nxt()[1]
+                self.func_lines.setdefault(name, fline)
+                self.expect('(')
+                params = []
+                if not self.accept(')'):
+                    while True:
+                        params.append(self.nxt()[1])
+                        if self.accept(','):
+                            continue
+                        self.expect(')')
+                        break
+                locs = []
+                if self.peek() == ('id', 'local'):
+                    self.i += 1
+                    self.expect('(')
+                    if not self.accept(')'):
+                        while True:
+                            locs.append(self.nxt()[1])
+                            if self.accept(','):
+                                continue
+                            self.expect(')')
+                            break
+                self.expect('(')
+                body = self.seq({')'})
+                self.expect(')')
+                self.accept(';')
+                funcs.append((name, params, locs, body))
+            else:
+                stmts.append(self.assign())
+                if not self.accept(';'):
+                    if self.peek()[0] != 'eof':
+                        raise SyntaxError('%s缺少 ;，附近：%s' % (self.where(), self.ctx()))
+        return funcs, ('seq', stmts)
+
+
+# =====================================================================
+#  代码生成
+# =====================================================================
+BUILTIN = {'abs': 'abs', 'floor': '_floor', 'max': 'max', 'min': 'min', 'pow': '_pow', 'sqrt': '_sqrt',
+           'sin': '_sin', 'cos': '_cos', 'tan': '_tan', 'exp': '_exp'}
+_UNREG = {'rand', 'log', 'log10', 'ceil', 'sign', 'sqr', 'invsqrt', 'atan', 'atan2', 'asin', 'acos', 'sinh', 'cosh', 'tanh'}
+SIMPLE = re.compile(r'^(?:[A-Za-z_]\w*|-?\d[\w.]*(?:e[+-]?\d+)?)$')
+
+
+def _unknown_func(name, line):
+    pre = '第 %d 行：' % line if line else ''
+    if name == 'while':
+        return SyntaxError(pre + '不支持 while（只支持 loop()）')
+    if name in _UNREG:
+        return SyntaxError(pre + '内建函数 %s 未注册：项目约定只允许 %s，宿主遇到未注册内建会判整个文件损坏' % (name, ' '.join(sorted(set(BUILTIN) | {'loop'}))))
+    return SyntaxError(pre + '未知函数 %s（不是 function 定义的函数，也不在 BUILTIN 表里）' % name)
+
+
+class Gen:
+    def __init__(self, userfuncs, strict=False):
+        self.userfuncs = set(userfuncs)
+        self.strict = strict
+        self.globals_seen = set()
+        self.nt = 0
+        self.boolx = set()
+        self.params = set()
+        self.fnprefix = '_top'
+
+    def tmp(self):
+        self.nt += 1
+        return '_t%d' % self.nt
+
+    def emit(self, s):
+        self.lines.append('    ' * self.ind + s)
+
+    def var(self, name):
+        if name in self.params:
+            return 'v_' + name
+        if name in self.locals:      # local() 持久化（真机探针 P01）：函数专属持久槽 v_<fn>__<name>
+            return 'v_%s__%s' % (self.fnprefix, name)
+        self.globals_seen.add(name)
+        return 'v_' + name
+
+    def ix(self, b, o):
+        return ('_ix(%s + %s + 1e-5)' if self.strict else 'int(%s + %s + 1e-5)') % (b, o)
+
+    def truth(self, s):
+        return s if s in self.boolx else 'abs(%s) > 1e-5' % s
+
+    def stash(self, s):
+        if SIMPLE.match(s) and not s.startswith('v_'):
+            return s
+        t = self.tmp()
+        self.emit('%s = %s' % (t, s))
+        return t
+
+    def two(self, a, b):
+        """compile a then b; make sure a's value is not disturbed by b's side effects"""
+        sa = self.expr(a)
+        pos = len(self.lines)
+        sb = self.expr(b)
+        if len(self.lines) != pos and not re.match(r'^(?:-?\d[\w.]*|_t\d+)$', sa):
+            t = self.tmp()
+            self.lines.insert(pos, '    ' * self.ind + '%s = %s' % (t, sa))
+            sa = t
+        return sa, sb
+
+    def stmt(self, n):
+        s = self.expr(n)
+        if not SIMPLE.match(s) and not s.startswith('M['):
+            self.emit(s)
+
+    def body_lines(self, n):
+        """compile node into separate buffer; returns (lines, expr)"""
+        saved, self.lines = self.lines, []
+        e = self.expr(n)
+        got, self.lines = self.lines, saved
+        return got, e
+
+    def expr(self, n):
+        k = n[0]
+        if k == 'num':
+            v = n[1]
+            return repr(v)
+        if k == 'var':
+            return self.var(n[1])
+        if k == 'idx':
+            b, o = self.two(n[1], n[2])
+            return 'M[%s]' % self.ix(b, o)
+        if k == 'neg':
+            return '(-%s)' % self.expr(n[1])
+        if k == 'not':
+            s = self.expr(n[1])
+            r = '(abs(%s) <= 1e-5)' % s
+            self.boolx.add(r)
+            return r
+        if k == 'bin':
+            op = n[1]
+            a, b = self.two(n[2], n[3])
+            if op in ('+', '-', '*'):
+                return '(%s %s %s)' % (a, op, b)
+            if op == '/':
+                if re.match(r'^-?\d', b) and float(b) != 0.0:
+                    return '(%s / %s)' % (a, b)
+                return '_div(%s, %s)' % (a, b)
+            if op == '%':
+                return '_mod(%s, %s)' % (a, b)
+            if op == '^':
+                return '_pow(%s, %s)' % (a, b)
+            if op == '==':
+                r = '(abs(%s - %s) < 1e-5)' % (a, b)
+            elif op == '!=':
+                r = '(abs(%s - %s) >= 1e-5)' % (a, b)
+            else:
+                r = '(%s %s %s)' % (a, op, b)
+            self.boolx.add(r)
+            return r
+        if k in ('and', 'or'):
+            t = self.tmp()
+            a = self.expr(n[1])
+            self.emit('%s = %s' % (t, self.truth(a)))
+            self.emit('if %s%s:' % ('' if k == 'and' else 'not ', t))
+            self.ind += 1
+            b = self.expr(n[2])
+            self.emit('%s = %s' % (t, self.truth(b)))
+            self.ind -= 1
+            self.boolx.add(t)
+            return t
+        if k == 'seq':
+            items = n[1]
+            if not items:
+                return '0.0'
+            for it in items[:-1]:
+                self.stmt(it)
+            return self.expr(items[-1])
+        if k == 'tern':
+            c = self.expr(n[1])
+            cs = self.truth(c)
+            la, ea = self.body_lines(n[2])
+            if n[3] is not None:
+                lb, eb = self.body_lines(n[3])
+            else:
+                lb, eb = [], '0.0'
+            if not la and not lb:
+                return '(%s if %s else %s)' % (ea, cs, eb)
+            t = self.tmp()
+            self.emit('if %s:' % cs)
+            self.ind += 1
+            for l in la:
+                self.lines.append('    ' + l)
+            self.emit('%s = %s' % (t, ea))
+            self.ind -= 1
+            self.emit('else:')
+            self.ind += 1
+            for l in lb:
+                self.lines.append('    ' + l)
+            self.emit('%s = %s' % (t, eb))
+            self.ind -= 1
+            return t
+        if k == 'assign':
+            op, tgt, rhs = n[1], n[2], n[3]
+            if tgt[0] == 'var':
+                name = tgt[1]
+                if name not in self.locals and name not in self.params:
+                    self.assigned.add(name)
+                v = self.var(name)
+                r = self.expr(rhs)
+                if op == '=':
+                    self.emit('%s = %s' % (v, r))
+                elif op == '/=':
+                    self.emit('%s = _div(%s, %s)' % (v, v, r))
+                elif op == '%=':
+                    self.emit('%s = _mod(%s, %s)' % (v, v, r))
+                else:
+                    self.emit('%s = %s %s %s' % (v, v, op[0], r))
+                return v
+            if tgt[0] == 'idx':
+                b, o = self.two(tgt[1], tgt[2])
+                it = self.tmp()
+                self.emit('%s = %s' % (it, self.ix(b, o)))
+                r = self.expr(rhs)
+                if op == '=':
+                    self.emit('M[%s] = %s' % (it, r))
+                elif op == '/=':
+                    self.emit('M[%s] = _div(M[%s], %s)' % (it, it, r))
+                elif op == '%=':
+                    self.emit('M[%s] = _mod(M[%s], %s)' % (it, it, r))
+                else:
+                    self.emit('M[%s] = M[%s] %s %s' % (it, it, op[0], r))
+                return 'M[%s]' % it
+            raise SyntaxError('bad assign target %r' % (tgt,))
+        if k == 'call':
+            name, args = n[1], n[2]
+            if name == 'loop':
+                c = self.expr(args[0])
+                self.emit('for _ in range(max(0, int(%s + 1e-6))):' % c)
+                self.ind += 1
+                before = len(self.lines)
+                body = args[1] if len(args) > 1 else ('seq', [])
+                if body[0] == 'seq':
+                    for it in body[1]:
+                        self.stmt(it)
+                else:
+                    self.stmt(body)
+                if len(self.lines) == before:
+                    self.emit('pass')
+                self.ind -= 1
+                return '0.0'
+            ss = []
+            for i, a in enumerate(args):
+                pos = len(self.lines)
+                s = self.expr(a)
+                if len(self.lines) != pos:
+                    # earlier args must be frozen before later statements run
+                    for j in range(len(ss)):
+                        if not re.match(r'^(?:-?\d[\w.]*|_t\d+)$', ss[j]):
+                            t = self.tmp()
+                            self.lines.insert(pos, '    ' * self.ind + '%s = %s' % (t, ss[j]))
+                            pos += 1
+                            ss[j] = t
+                ss.append(s)
+            if name in BUILTIN:
+                return '%s(%s)' % (BUILTIN[name], ', '.join(ss))
+            if name in self.userfuncs:
+                return 'f_%s(%s)' % (name, ', '.join(ss))
+            raise _unknown_func(name, n[3] if len(n) > 3 else 0)
+        raise SyntaxError('node ' + repr(n))
+
+    def gen_func(self, pyname, params, locs, body, ret=True):
+        # local() 持久化（真机探针 P01：跨调用保留状态）：不再每次调用清零，
+        # local 改编译为函数专属全局槽 v_<fn>__<name>，由 compile_eel 在模块装配时
+        # 一次性初始化 0.0（模拟宿主加载时内存清零）；params 仍是每次调用的形参。
+        self.fnprefix = pyname
+        self.params = set(params)
+        self.locals = set(locs)
+        self.assigned = set()
+        self.lines, self.ind = [], 1
+        if ret:
+            if body[0] == 'seq' and body[1]:
+                for it in body[1][:-1]:
+                    self.stmt(it)
+                last = self.expr(body[1][-1])
+            else:
+                last = '0.0'
+            self.emit('return %s' % last)
+        else:
+            for it in body[1]:
+                self.stmt(it)
+            self.emit('return 0.0')
+        head = 'def %s(%s):' % (pyname, ', '.join('v_' + p for p in params))
+        gl = sorted(self.assigned | set('%s__%s' % (pyname, l) for l in locs))
+        out = [head]
+        if gl:
+            out.append('    global ' + ', '.join('v_' + g for g in gl))
+        out += self.lines
+        return '\n'.join(out)
+
+
+_PRELUDE = '''
+def _floor(x): return float(math.floor(x))
+def _div(a, b):
+    # 真机探针 P07/P08：1/0 是大数（>3000）且不为 0。有限大数还是 inf 待探针 P16 细分，暂按 IEEE。
+    if b != 0:
+        return a / b
+    if a > 0:
+        return float('inf')
+    if a < 0:
+        return float('-inf')
+    return float('nan')
+def _mod(a, b):
+    # 真机探针 P04-P06：-7%3 ∉ {-1,2}、7%-3 ≠ -2 → 排除 C 式与 Python 式 → 绝对值式 |fmod|。
+    # 非整数细分待探针 P13-P15；%0 与 inf/nan 操作数未探，兜 0。
+    try:
+        return abs(math.fmod(a, b))
+    except (ValueError, OverflowError):
+        return 0.0
+def _pow(a, b):
+    try: return math.pow(a, b)
+    except (ValueError, OverflowError, ZeroDivisionError): return float('nan')
+def _sqrt(x): return math.sqrt(abs(x))
+def _sin(x):
+    try: return math.sin(x)
+    except ValueError: return float('nan')
+def _cos(x):
+    try: return math.cos(x)
+    except ValueError: return float('nan')
+def _tan(x):
+    try: return math.tan(x)
+    except ValueError: return float('nan')
+def _exp(x):
+    try: return math.exp(x)
+    except OverflowError: return float('inf')
+def _ix(x):
+    i = int(x)
+    if i < 0 or i >= MEM:
+        raise IndexError('内存下标 %d 越界（合法范围 0..%d）' % (i, MEM - 1))
+    return i
+'''
+
+
+def compile_eel(src, strict=False, mem=MEMSIZE):
+    init_src, l0, samp_src, l1 = split_sections(src)
+    pi = Parser(*_prep(init_src, l0))
+    fi, si = pi.toplevel()                     # 初始化段只解析 1 遍
+    ps = Parser(*_prep(samp_src, l1))
+    fs, ss = ps.toplevel()
+    if fs:
+        raise SyntaxError('第 %d 行：函数只能定义在初始化段，采样段里不能写 function' % ps.func_lines[fs[0][0]])
+    g = Gen([f[0] for f in fi], strict)
+    out = ['import math', 'MEM = %d' % mem, 'M = [0.0] * MEM', _PRELUDE]
+    funcs_py = []
+    locinits = []                       # 持久 local 槽一次性初始化（真机 P01：跨调用保留）
+    for (name, params, locs, body) in fi:
+        funcs_py.append(g.gen_func('f_' + name, params, locs, body))
+        locinits += ['v_f_%s__%s = 0.0' % (name, l) for l in locs]
+    g.locals = set()
+    funcs_py.append(g.gen_func('_init', [], [], si, ret=False))
+    funcs_py.append(g.gen_func('_sample', [], [], ss, ret=False))
+    # all globals default 0
+    gl = sorted(g.globals_seen)
+    out.append('\n'.join('v_%s = 0.0' % x for x in gl))
+    out.append('v_srate = 48000.0')
+    out += locinits
+    out += funcs_py
+    return '\n'.join(out) + '\n'
+
+
+_CACHE = {}
+
+
+def _compiled(src, strict, mem):
+    """同一份源码只转译 / 编译一次（check 会反复创建 Project）。"""
+    key = (src, strict, mem)
+    if key not in _CACHE:
+        _CACHE[key] = compile(compile_eel(src, strict, mem), _FN, 'exec')
+    return _CACHE[key]
+
+
+# =====================================================================
+#  静态检查
+# =====================================================================
+_HOST_VARS = {'spl0', 'spl1', 'srate'}
+
+
+def _children(n):
+    k = n[0]
+    if k == 'idx':
+        return [n[1], n[2]]
+    if k in ('neg', 'not'):
+        return [n[1]]
+    if k == 'bin':
+        return [n[2], n[3]]
+    if k in ('and', 'or'):
+        return [n[1], n[2]]
+    if k == 'seq':
+        return list(n[1])
+    if k == 'tern':
+        return [n[1], n[2]] + ([n[3]] if n[3] is not None else [])
+    if k == 'assign':
+        return [n[2], n[3]]
+    if k == 'call':
+        return list(n[2])
+    return []
+
+
+def _walk(n, fn):
+    fn(n)
+    for c in _children(n):
+        _walk(c, fn)
+
+
+def _rw(n, loc, rd, wr):
+    """收集全局变量的读 / 写（local 与参数不算）。"""
+    k = n[0]
+    if k == 'var':
+        if n[1] not in loc:
+            rd.add(n[1])
+    elif k == 'assign':
+        tgt = n[2]
+        if tgt[0] == 'var':
+            if tgt[1] not in loc:
+                wr.add(tgt[1])
+                if n[1] != '=':
+                    rd.add(tgt[1])
+        else:
+            _rw(tgt, loc, rd, wr)
+        _rw(n[3], loc, rd, wr)
+    else:
+        for c in _children(n):
+            _rw(c, loc, rd, wr)
+
+
+def lint(src):
+    """静态检查，返回 [(级别, 行号, 说明)]；级别 'ERROR' / 'WARN'。"""
+    out = []
+    n_i, n_s, n_at = src.count('@init'), src.count('@sample'), src.count('@')
+    if (n_i, n_s, n_at) != (1, 1, 2):
+        ats = [i + 1 for i, l in enumerate(src.split('\n')) if '@' in l]
+        out.append(('ERROR', 0, '段落标记 / 裸 @ 字符个数异常：@init=%d @sample=%d 全部@=%d（应为 1 / 1 / 2；注释里多出一个也会让宿主判文件损坏）；含 @ 的行：%s'
+                    % (n_i, n_s, n_at, ' '.join(map(str, ats[:10])))))
+    try:
+        init_src, l0, samp_src, l1 = split_sections(src)
+        ti = tokenize_pos(init_src, l0)
+        ts = tokenize_pos(samp_src, l1)
+    except SyntaxError as e:
+        out.append(('ERROR', 0, str(e)))
+        return out
+    toks = ti + ts
+    for i in range(len(toks)):
+        k, t, ln = toks[i]
+        if (k == 'num' and t[-1] in 'eE' and i + 2 < len(toks)
+                and toks[i + 1][:2] in (('op', '+'), ('op', '-')) and toks[i + 2][0] == 'num'):
+            out.append(('ERROR', ln, '带符号的指数 %s%s%s：EEL_VM 词法器的数字 token 不吞符号，宿主会把它读成 %s %s %s（静默错值）；请改成十进制写法' % (
+                t, toks[i + 1][1], toks[i + 2][1], t[:-1], toks[i + 1][1], toks[i + 2][1])))
+    # 先定义后调用
+    names = {toks[i + 1][1] for i, (k, t, _) in enumerate(toks[:-1]) if (k, t) == ('id', 'function')}
+    defined = {}
+    i = 0
+    while i < len(toks):
+        k, t, ln = toks[i]
+        if (k, t) == ('id', 'function') and i + 1 < len(toks):
+            nm = toks[i + 1][1]
+            if nm in defined:
+                out.append(('WARN', ln, '函数 %s 重复定义（第 %d 行已定义过）' % (nm, defined[nm])))
+            else:
+                defined[nm] = ln
+            i += 2
+            continue
+        if k == 'id' and t in names and t not in defined and i + 1 < len(toks) and toks[i + 1][:2] == ('op', '('):
+            out.append(('ERROR', ln, '函数 %s 在定义之前被调用（EEL2 须先定义后调用，否则编译失败 → 宿主判文件损坏）' % t))
+        i += 1
+    # 语法 + 参数个数 + 只读变量
+    try:
+        pi = Parser([(k, t) for k, t, _ in ti], [ln for _, _, ln in ti])
+        fi, si = pi.toplevel()
+        ps = Parser([(k, t) for k, t, _ in ts], [ln for _, _, ln in ts])
+        fs, ss = ps.toplevel()
+    except SyntaxError as e:
+        out.append(('ERROR', 0, '语法错误：%s' % e))
+        return out
+    if fs:
+        out.append(('ERROR', ps.func_lines[fs[0][0]], '函数只能定义在初始化段，采样段里不能写 function'))
+    ar = {f[0]: len(f[1]) for f in fi}
+    bad_call = set()
+
+    def chk(n):
+        if n[0] == 'call' and n[1] not in BUILTIN and n[1] != 'loop':
+            if n[1] in ar:
+                if len(n[2]) != ar[n[1]]:
+                    out.append(('ERROR', n[3], '函数 %s 定义有 %d 个参数，这里传了 %d 个（本脚本不支持参数个数不符）' % (n[1], ar[n[1]], len(n[2]))))
+            elif n[1] not in bad_call:
+                bad_call.add(n[1])
+                out.append(('ERROR', n[3], str(_unknown_func(n[1], 0))))
+    for (_, _, _, body) in fi:
+        _walk(body, chk)
+    _walk(si, chk)
+    _walk(ss, chk)
+    rd, wr = set(), set()
+    for (_, params, locs, body) in fi:
+        _rw(body, set(params) | set(locs), rd, wr)
+    _rw(si, set(), rd, wr)
+    _rw(ss, set(), rd, wr)
+    ro = sorted(rd - wr - _HOST_VARS - set(ar))
+    if ro:
+        out.append(('WARN', 0, '%d 个全局变量只读不写（值恒为 0；若不是有意的，多半是拼写错误）：%s%s' % (
+            len(ro), ' '.join(ro[:12]), ' ...' if len(ro) > 12 else '')))
+    out.sort(key=lambda x: (x[0] != 'ERROR', x[1]))
+    return out
+
+
+def print_lint(findings):
+    ne = sum(1 for f in findings if f[0] == 'ERROR')
+    nw = len(findings) - ne
+    print('静态检查：%d 个 ERROR / %d 个 WARN' % (ne, nw))
+    for lv, ln, msg in findings:
+        print('  [%s] %s%s' % (lv, '第 %d 行：' % ln if ln else '', msg))
+    return ne
+
+
+# =====================================================================
+#  运行 / 测量
+# =====================================================================
+SR = 48000
+FREQS = [30, 60, 100, 200, 400, 800, 1000, 2000, 3000, 4000, 6000, 8000, 10000, 12000, 16000]
+
+
+class EelRuntimeError(RuntimeError):
+    """转译出来的代码在运行时出错；说明里带出错的函数名（如 采样段 → s_p_tap）。"""
+
+
+def _where_eel(tb):
+    names, last = [], 0
+    while tb is not None:
+        c = tb.tb_frame.f_code
+        if c.co_filename == _FN and (not c.co_name.startswith('_') or c.co_name in ('_init', '_sample')):
+            nm = c.co_name
+            names.append('初始化段' if nm == '_init' else '采样段' if nm == '_sample' else nm[2:] if nm.startswith('f_') else nm)
+            last = tb.tb_lineno
+        tb = tb.tb_next
+    return (' → '.join(names) + '（转译代码第 %d 行）' % last) if names else '?'
+
+
+class Project:
+    """把一个项目 txt 转译成 Python 并初始化；run() 跑 @sample 段。"""
+
+    def __init__(self, path, srate=SR, strict=False, mem=MEMSIZE):
+        self.path = path
+        self.mem = mem
+        self.src = _read(path)
+        self.ns = {}
+        exec(_compiled(self.src, strict, mem), self.ns)
+        self.ns['v_srate'] = float(srate)
+        self._guard(self.ns['_init'])
+
+    def _guard(self, fn, *args):
+        try:
+            return fn(*args)
+        except Exception as e:
+            hint = ''
+            msg = str(e)
+            if isinstance(e, IndexError) and 'out of range' in msg:
+                hint = '（内存数组 M 共 %d 格，下标越界：可用 --mem 调大；加 --strict 可定位到具体下标）' % self.mem
+            elif isinstance(e, (ValueError, OverflowError)) and ('NaN' in msg or 'infinity' in msg):
+                hint = '（下标 / 循环次数里出现 NaN 或 inf，说明上游已经发散）'
+            raise EelRuntimeError('%s：运行异常 %s: %s  位置：%s%s' % (self.path, type(e).__name__, msg, _where_eel(e.__traceback__), hint)) from e
+
+    def get(self, name):
+        return self.ns.get('v_' + name)
+
+    def run(self, L, R):
+        _need_np()
+        L = np.asarray(L, dtype=float)
+        R = np.asarray(R, dtype=float)
+        if len(L) != len(R):
+            raise ValueError('L / R 长度不同：%d vs %d' % (len(L), len(R)))
+        oL, oR = self._guard(_loop, self.ns, L.tolist(), R.tolist())
+        return np.array(oL), np.array(oR)
+
+
+def _loop(ns, L, R):
+    f = ns['_sample']
+    oL, oR = [0.0] * len(L), [0.0] * len(L)
+    for i in range(len(L)):
+        ns['v_spl0'] = L[i]
+        ns['v_spl1'] = R[i]
+        f()
+        oL[i] = ns['v_spl0']
+        oR[i] = ns['v_spl1']
+    return oL, oR
+
+
+def impulse_response(path, mode='mid', n=16384, amp=1e-3, **opts):
+    """小幅度冲激 → 线性小信号频响（谐波 / 动态在此幅度下几乎不起作用）。
+    mode='mid'：L=R，返回 (mid 输出, side 残留, 输入)；mode='side'：L=-R，返回 (side 输出, mid 残留, 输入)。"""
+    p = Project(path, **opts)
+    x = np.zeros(n)
+    x[64] = amp
+    oL, oR = p.run(x, x if mode == 'mid' else -x)
+    m, sd = 0.5 * (oL + oR), 0.5 * (oL - oR)
+    return (m, sd, x) if mode == 'mid' else (sd, m, x)
+
+
+def resp(y, x, freqs=FREQS):
+    """在每个频点 ±1/12 倍频程内取 |Y/X| 的平均，返回 dB 列表；区间内没有频率 bin 时取最近的一个 bin。"""
+    with np.errstate(all='ignore'):
+        H = np.fft.rfft(y) / np.fft.rfft(x)
+        f = np.fft.rfftfreq(len(y), 1.0 / SR)
+        out = []
+        for fr in freqs:
+            sel = (f >= fr * 2 ** (-1 / 12)) & (f <= fr * 2 ** (1 / 12))
+            if not sel.any():
+                sel = np.zeros(len(f), dtype=bool)
+                sel[int(np.argmin(np.abs(f - fr)))] = True
+            out.append(20 * np.log10(np.mean(np.abs(H[sel]))))
+    return out
+
+
+def thd(path, f0, level_db, n=24000, harmonics=(2, 3, 4, 5), **opts):
+    """单音（mid）：返回 (基波增益 dB, {谐波次数: 相对基波 dB})。取后半段做汉宁窗 FFT。"""
+    p = Project(path, **opts)
+    t = np.arange(n) / SR
+    k = round(f0 * n / SR)
+    f0c = k * SR / n
+    a = 10 ** (level_db / 20)
+    x = a * np.sin(2 * np.pi * f0c * t)
+    oL, _ = p.run(x, x)
+    y = oL[n // 2:]
+    nn = len(y)
+    w = np.hanning(nn)
+    Y = np.abs(np.fft.rfft(y * w)) * 2 / np.sum(w)
+
+    def at(f):
+        b = int(round(f * nn / SR))
+        return np.max(Y[max(0, b - 2):b + 3])
+    base = at(f0c)
+    with np.errstate(all='ignore'):
+        res = {h: 20 * np.log10(max(at(h * f0c), 1e-12) / base) for h in harmonics if h * f0c < SR / 2 - 200}
+        return 20 * np.log10(base / a), res
+
+
+# =====================================================================
+#  代码等价比对
+# =====================================================================
+def _code_tokens(path):
+    """返回 (token 列表[(kind, text)], 对应行号列表, 告警列表)。"""
+    s = _read(path)
+    msgs = []
+    if s.count('@init') != 1 or s.count('@sample') != 1 or s.count('@') != 2:
+        msgs.append('%s：段落标记 / 裸 @ 字符数异常（@init=%d @sample=%d 全部@=%d）' % (path, s.count('@init'), s.count('@sample'), s.count('@')))
+    try:
+        init_src, l0, samp_src, l1 = split_sections(s)
+        a, la = _prep(init_src, l0)
+        b, lb = _prep(samp_src, l1)
+    except SyntaxError as e:
+        raise SyntaxError('%s：%s' % (path, e))
+    return a + [('sec', 'sample')] + b, la + [l1] + lb, msgs
+
+
+def _units(toks, lines):
+    """把 token 流按 ';' 切成语句级单元：[(token 元组, 起始行号)]。"""
+    out, cur, cl = [], [], 0
+    for (k, t), ln in zip(toks, lines):
+        if not cur:
+            cl = ln
+        cur.append((k, t))
+        if (k == 'op' and t == ';') or k == 'sec':
+            out.append((tuple(cur), cl))
+            cur = []
+    if cur:
+        out.append((tuple(cur), cl))
+    return out
+
+
+def _snip(units, i, j, width=110):
+    s = ' '.join(t for u, _ in units[i:j] for _, t in u)
+    return s if len(s) <= width else s[:width] + ' ...'
+
+
+def samecode(path_a, path_b, max_blocks=5):
+    """逐 token 比对两个项目文件 @init 之后的代码；注释 / 空白 / 文件头的差异一律忽略。
+    返回 (是否等价, 说明)。同时检查段落标记在全文只各出现一次（LiveProg 规则）。
+    不等价时说明里含：第一处不同的位置、语句级差异块个数、前 max_blocks 个块的行号与摘要。"""
+    (a, la, ma), (b, lb, mb) = _code_tokens(path_a), _code_tokens(path_b)
+    msgs = ma + mb
+    if a == b:
+        return (not msgs), '；'.join(msgs) if msgs else '代码等价：token 流逐一相同（%d 个 token）' % len(a)
+    lines = list(msgs)
+    first = next((i for i, (x, y) in enumerate(zip(a, b)) if x != y), None)
+    if first is None:
+        lines.append('token 数不同：%d vs %d' % (len(a), len(b)))
+    else:
+        i = first
+        ctx = lambda t: ' '.join(v for _, v in t[max(0, i - 8):i + 8])
+        lines.append('第 %d 个 token 起不同（A 第 %d 行 / B 第 %d 行）：\n  A: %s\n  B: %s' % (i, la[i], lb[i], ctx(a), ctx(b)))
+    ua, ub = _units(a, la), _units(b, lb)
+    sm = difflib.SequenceMatcher(None, [u for u, _ in ua], [u for u, _ in ub], autojunk=False)
+    blocks = [o for o in sm.get_opcodes() if o[0] != 'equal']
+    lines.append('语句级差异块共 %d 个（A %d 条语句，B %d 条语句）：' % (len(blocks), len(ua), len(ub)))
+    for tag, i1, i2, j1, j2 in blocks[:max_blocks]:
+        na = ua[i1][1] if i1 < len(ua) else (ua[-1][1] if ua else 0)
+        nb = ub[j1][1] if j1 < len(ub) else (ub[-1][1] if ub else 0)
+        lines.append('  [%s] A 第 %d 行起（%d 条）/ B 第 %d 行起（%d 条）\n    A: %s\n    B: %s' % (
+            {'replace': '改', 'delete': 'A 独有', 'insert': 'B 独有'}[tag], na, i2 - i1, nb, j2 - j1,
+            _snip(ua, i1, i2) or '（无）', _snip(ub, j1, j2) or '（无）'))
+    if len(blocks) > max_blocks:
+        lines.append('  ……其余 %d 个块未列出（--blocks N 可调）' % (len(blocks) - max_blocks))
+    return False, '\n'.join(lines)
+
+
+# =====================================================================
+#  A/B 对拍
+# =====================================================================
+_AB_SEGS = [(12000, '噪声'), (18000, '纯 side 冲激及其尾部'), (24000, 'mid 双单音 60/1000Hz'), (30000, '单边单音 3kHz'), (36000, '静音末段')]
+
+
+def _ab_signal():
+    rng = np.random.default_rng(11)
+    L, R = np.zeros(36000), np.zeros(36000)
+    L[:12000] = np.clip(rng.standard_normal(12000) * 0.3, -1, 1)
+    R[:12000] = np.clip(rng.standard_normal(12000) * 0.3, -1, 1)
+    L[12000], R[12000] = 0.8, -0.8
+    t = np.arange(6000) / SR
+    s = 0.5 * np.sin(2 * np.pi * 60 * t) + 0.25 * np.sin(2 * np.pi * 1000 * t)
+    L[18000:24000] = s
+    R[18000:24000] = s
+    L[24000:30000] = 0.5 * np.sin(2 * np.pi * 3000 * t)
+    return L, R
+
+
+def abtest(path_a, path_b, tol=0.0, **opts):
+    """同一组测试信号（噪声 / side 冲激 / mid 双单音 / 单边单音 / 静音）喂给两个文件，逐样本对拍。
+    返回 (是否在容差内, 说明)；tol=0 即要求逐位一致。"""
+    _need_np()
+    L, R = _ab_signal()
+    aL, aR = Project(path_a, **opts).run(L, R)
+    bL, bR = Project(path_b, **opts).run(L, R)
+    same = np.array_equal(aL, bL, equal_nan=True) and np.array_equal(aR, bR, equal_nan=True)
+    with np.errstate(all='ignore'):
+        dL, dR = np.abs(aL - bL), np.abs(aR - bR)
+        dmax = float(max(np.nanmax(dL), np.nanmax(dR)))
+        rms_d = float(np.sqrt(np.mean(np.concatenate([dL, dR]) ** 2)))
+        rms_o = float(np.sqrt(np.mean(np.concatenate([aL, aR]) ** 2)))
+    lines = ['测试信号：%d 样本（%s）' % (len(L), ' / '.join(n for _, n in _AB_SEGS)),
+             '逐位一致：%s' % ('是' if same else '否')]
+    if not same:
+        lines.append('最大差 |A-B|：%.3e（%.1f dBFS）；RMS 差相对 A 输出 RMS：%.1f dB' % (
+            dmax, 20 * np.log10(max(dmax, 1e-30)), 20 * np.log10(max(rms_d, 1e-30) / max(rms_o, 1e-30))))
+        idx = np.where(~(np.isclose(aL, bL, rtol=0, atol=0, equal_nan=True) & np.isclose(aR, bR, rtol=0, atol=0, equal_nan=True)))[0]
+        i = int(idx[0])
+        seg = next(n for e, n in _AB_SEGS if i < e)
+        lines.append('首个不同样本：第 %d 个（%s）；不同样本共 %d 个' % (i, seg, len(idx)))
+        if tol > 0:
+            lines.append('容差 %.3e：%s' % (tol, '在容差内' if dmax <= tol else '超出容差'))
+    ok = same or dmax <= tol
+    return ok, '\n'.join(lines)
+
+
+# =====================================================================
+#  check
+# =====================================================================
+def _task(a):
+    kind, path, opts = a[0], a[1], a[2]
+    try:
+        if kind == 'ir':
+            y, other, x = impulse_response(path, a[3], **opts)
+            return ('ok', (resp(y, x), float(np.max(np.abs(other)))))
+        if kind == 'thd':
+            return ('ok', thd(path, a[3], a[4], **opts))
+        if kind == 'noise':
+            oL, oR = Project(path, **opts).run(a[3], a[4])
+            return ('ok', (bool(np.all(np.isfinite(oL) & np.isfinite(oR))), float(max(np.abs(oL).max(), np.abs(oR).max()))))
+        if kind == 'silence':
+            oL, _ = Project(path, **opts).run(a[3], a[3])
+            return ('ok', float(np.max(np.abs(oL[-24000:]))))
+    except Exception as e:
+        return ('err', '%s: %s' % (type(e).__name__, e))
+    return ('err', '未知任务 %r' % (kind,))
+
+
+def _run_tasks(tasks, jobs):
+    if jobs > 1 and len(tasks) > 1:
+        try:
+            from concurrent.futures import ProcessPoolExecutor
+            with ProcessPoolExecutor(max_workers=min(jobs, len(tasks))) as ex:
+                return list(ex.map(_task, tasks))
+        except Exception as e:      # 环境不支持多进程 → 退回串行
+            print('（多进程不可用：%s；改为串行）' % type(e).__name__, file=sys.stderr)
+    return [_task(t) for t in tasks]
+
+
+def check(path, jobs=None, strict=False, mem=MEMSIZE):
+    """返回 True = 没发现问题。"""
+    _need_np()
+    t0 = time.time()
+    if jobs is None:
+        cpus = os.cpu_count() or 1
+        jobs = 1 if cpus <= 1 else min(cpus, 4)
+    opts = {'strict': strict, 'mem': mem}
+    problems = []
+    src = _read(path)
+    print('文件：%s' % path)
+    print('段落标记 / 裸@：@init=%d @sample=%d 全部@=%d（应为 1 / 1 / 2）' % (src.count('@init'), src.count('@sample'), src.count('@')))
+    findings = lint(src)
+    if print_lint(findings):
+        problems.append('静态检查有 ERROR')
+    try:
+        p = Project(path, **opts)
+    except (SyntaxError, EelRuntimeError) as e:
+        print('无法转译 / 初始化：%s' % e)
+        print('结论：发现问题 —— 转译或初始化失败')
+        return False
+    print('节点：dual=%s mid=%s side=%s  BUS_ANY=%s  S_OVERFLOW=%s' % (p.get('DUAL_COUNT'), p.get('MID_COUNT'), p.get('SIDE_COUNT'), p.get('BUS_ANY'), p.get('S_OVERFLOW')))
+    rng = np.random.default_rng(5)
+    n = 48000
+    L = np.clip(rng.standard_normal(n) * 0.3, -1, 1)
+    R = np.clip(rng.standard_normal(n) * 0.3, -1, 1)
+    xs = np.zeros(96000)
+    xs[:12000] = np.clip(rng.standard_normal(12000) * 0.5, -1, 1)
+    tasks = [('ir', path, opts, 'mid'), ('ir', path, opts, 'side')]
+    tasks += [('thd', path, opts, f0, -12) for f0 in (60, 120, 1000)]
+    tasks += [('noise', path, opts, L, R), ('silence', path, opts, xs)]
+    res = _run_tasks(tasks, jobs)
+
+    def val(i, what):
+        if res[i][0] == 'err':
+            print('%s：测量失败 —— %s' % (what, res[i][1]))
+            problems.append(what + '失败')
+            return None
+        return res[i][1]
+    mid, side = val(0, '频响(mid)'), val(1, '频响(side)')
+    print('频响 dB（含输出增益；小信号）')
+    print('  Hz   ' + ' '.join('%6d' % f for f in FREQS))
+    if mid:
+        print('  mid  ' + ' '.join('%+6.2f' % v for v in mid[0]))
+    if side:
+        print('  side ' + ' '.join('%+6.2f' % v for v in side[0]))
+    if mid:
+        print('单声道残留 max|side|（mid 输入）：%.2e' % mid[1])
+    for i, f0 in enumerate((60, 120, 1000)):
+        r = val(2 + i, 'THD %dHz' % f0)
+        if r:
+            g, h = r
+            print('THD %5dHz -12dBFS：基波增益 %+.2f dB  ' % (f0, g) + '  '.join('H%d %.1f' % (k, v) for k, v in h.items()))
+    r = val(5, '满幅噪声')
+    if r:
+        print('满幅噪声：全部有限=%s  输出峰值 %.3f' % (r[0], r[1]))
+        if not r[0]:
+            problems.append('满幅噪声输出出现 NaN / inf')
+    r = val(6, '静音末段')
+    if r is not None:
+        print('静音末段 max|y|：%.2e' % r)
+    print('结论：%s；用时 %.1f 秒' % ('未发现问题（静态检查 / 稳定性）' if not problems else '发现问题 —— ' + '；'.join(problems), time.time() - t0))
+    return not problems
+
+
+# =====================================================================
+#  命令行
+# =====================================================================
+def main(argv=None):
+    import argparse
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(errors='replace')
+    ap = argparse.ArgumentParser(prog='x176_eel_tools', add_help=True, description='X176 Freedom 的 EEL2 转译 / 静态检查 / 测量 / 代码等价比对 / A-B 对拍工具')
+    ap.add_argument('--version', action='version', version='x176_eel_tools ' + __version__)
+    sub = ap.add_subparsers(dest='cmd')
+    c = sub.add_parser('check', help='lint + 频响 / THD / 稳定性测量')
+    c.add_argument('path')
+    c.add_argument('--jobs', type=int, default=None)
+    c.add_argument('--strict', action='store_true')
+    c.add_argument('--mem', type=int, default=MEMSIZE)
+    c = sub.add_parser('lint', help='只做静态检查')
+    c.add_argument('path')
+    c = sub.add_parser('samecode', help='逐 token 比对两个文件的代码')
+    c.add_argument('a')
+    c.add_argument('b')
+    c.add_argument('--blocks', type=int, default=5)
+    c = sub.add_parser('ab', help='同一组信号逐样本对拍两个文件的输出')
+    c.add_argument('a')
+    c.add_argument('b')
+    c.add_argument('--tol', type=float, default=0.0)
+    c.add_argument('--strict', action='store_true')
+    c.add_argument('--mem', type=int, default=MEMSIZE)
+    c = sub.add_parser('compile', help='只转译成 Python 模块')
+    c.add_argument('path')
+    c.add_argument('out')
+    c.add_argument('--strict', action='store_true')
+    c.add_argument('--mem', type=int, default=MEMSIZE)
+    a = ap.parse_args(argv)
+    if a.cmd is None:
+        print(__doc__)
+        return 0
+    try:
+        if a.cmd == 'check':
+            return 0 if check(a.path, a.jobs, a.strict, a.mem) else 1
+        if a.cmd == 'lint':
+            return 1 if print_lint(lint(_read(a.path))) else 0
+        if a.cmd == 'samecode':
+            ok, msg = samecode(a.a, a.b, a.blocks)
+            print(msg)
+            return 0 if ok else 1
+        if a.cmd == 'ab':
+            ok, msg = abtest(a.a, a.b, a.tol, strict=a.strict, mem=a.mem)
+            print(msg)
+            return 0 if ok else 1
+        if a.cmd == 'compile':
+            py = compile_eel(_read(a.path), a.strict, a.mem)
+            with open(a.out, 'w', encoding='utf-8') as f:
+                f.write(py)
+            for lv, ln, msg in lint(_read(a.path)):
+                print('[%s] %s%s' % (lv, '第 %d 行：' % ln if ln else '', msg), file=sys.stderr)
+            print('ok')
+            return 0
+    except (SyntaxError, EelRuntimeError, OSError) as e:
+        print('错误：%s' % e, file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
