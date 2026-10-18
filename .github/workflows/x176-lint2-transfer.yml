@@ -25,6 +25,7 @@ jobs:
         id: lint
         shell: bash
         run: |
+          set +e
           set -u
           cp x176_eel_lint2.txt x176_eel_lint2.py
           cp_rc=$?
@@ -33,6 +34,8 @@ jobs:
           python3 --version > python-version.log 2>&1
           sha256sum x176_eel_lint2.txt x176_eel_lint2.py > source-hashes.txt
           wc -lc x176_eel_lint2.txt x176_eel_lint2.py > source-size.txt
+          python3 -m py_compile x176_eel_lint2.py > pycompile.log 2>&1
+          pycompile_rc=$?
 
           python3 x176_eel_lint2.py --version > version.log 2>&1
           version_rc=$?
@@ -54,6 +57,7 @@ jobs:
             echo "Copy exit code: $cp_rc"
             echo "Byte comparison exit code: $cmp_rc"
             echo "Version command exit code: $version_rc"
+            echo "Python compilation exit code: $pycompile_rc"
             echo "Self-test exit code: $selftest_rc"
             echo "Invalid-option command exit code: $invalid_rc (expected 2)"
             echo
@@ -72,6 +76,7 @@ jobs:
             echo "cp_rc=$cp_rc"
             echo "cmp_rc=$cmp_rc"
             echo "version_rc=$version_rc"
+            echo "pycompile_rc=$pycompile_rc"
             echo "selftest_rc=$selftest_rc"
             echo "invalid_rc=$invalid_rc"
           } >> "$GITHUB_OUTPUT"
@@ -90,6 +95,7 @@ jobs:
             source-hashes.txt
             source-size.txt
             version.log
+            pycompile.log
             selftest.log
             invalid-option.log
             execution-report.txt
@@ -101,11 +107,13 @@ jobs:
           CP_RC: ${{ steps.lint.outputs.cp_rc }}
           CMP_RC: ${{ steps.lint.outputs.cmp_rc }}
           VERSION_RC: ${{ steps.lint.outputs.version_rc }}
+          PYCOMPILE_RC: ${{ steps.lint.outputs.pycompile_rc }}
           SELFTEST_RC: ${{ steps.lint.outputs.selftest_rc }}
           INVALID_RC: ${{ steps.lint.outputs.invalid_rc }}
         run: |
           test "${CP_RC}" = "0" &&
           test "${CMP_RC}" = "0" &&
           test "${VERSION_RC}" = "0" &&
+          test "${PYCOMPILE_RC}" = "0" &&
           test "${SELFTEST_RC}" = "0" &&
           test "${INVALID_RC}" = "2"
