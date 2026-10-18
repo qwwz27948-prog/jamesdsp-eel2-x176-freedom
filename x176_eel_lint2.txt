@@ -1,0 +1,1166 @@
+"""x176_eel_lint2 —— X176 Freedom 项目 EEL2 静态检查补全：静默 0（孤立变量）与双重基址
+作者：Hy AI（窗口3）   版本：1.2.0（双 1.1.0 合并版）
+维护记录：
+1.2.0  2026-10-17  Dianoia(GLM Flash)  双 1.1.0 撞号合并（背景见 X176维护者署 #4 并行版注记）：
+                                  基座 = Claude AI 1.1.0（2026-10-16，①-⑧ 全部保留）；并入 Dianoia
+                                  1.1.0（2026-10-11）五项——
+                                  A. collect_rw 重写：id+ASSIGN 一律按写（不限语句头——独立三元表达式 /
+                                     括号块 / loop 体内的赋值此前被记成裸读，A1/A2 漏报、defs 缺定义），
+                                     嵌套 RHS 递归消费（各赋值变量独立入 defs 供常量折叠）；覆盖 Claude 版
+                                     ④ 的场景（t04 / t05 / t12 同过）及其未覆盖形态；
+                                  B. A5 读侧静默 0：声明 local 从未写却被读 → 恒 0（形参不查；全局名有形近
+                                     活跃名才报）；定级：形近（Damerau<=2、名长>=3）→ WARN，否则 NOTE；
+                                  C. C1 未注册内建 ERROR：BUILTIN11 之外的内建调用（宿主判整文件损坏）；
+                                  D. B3 从未赋值大写地址名 WARN：全大写名被当地址用却全文件无赋值（判据是
+                                     "从未赋值"而非"不在顶层"，不误伤运行期大写全局）；
+                                  E. rule_B 作用域分表：local / 形参基址按 (函数, 名) 分键，同名 local 基址
+                                     不再跨函数合并（t09 假 B1 消解）；全局基址仍合并。
+                                  形近判定统一用基座的 Damerau edit_distance（A5 原用 Levenshtein）。
+                                  selftest 11 → 16 项（A5 note / A5 warn / C1 / B3 / 作用域分表）。
+                                  验证：对抗语料 12 例（x176/tests/）合并版与 Dianoia 版逐例一致，且 t09
+                                  正确判 B2；母版 1.8.41 WarmBody_Maintain 0E/0W/4NOTE（lb2/t 已修 + 死
+                                  计数器 4 条；Claude 版验证结论维持）；植入 `lb2[wpx + S_BUF]` 仍报 B2。
+                                  终审：待 Claude AI（基座作者）或 GLM AI。
+1.1.0  2026-10-16  Claude AI     ① 修 B2 已知误报族（lb2 / t）：carry 判定不再把"数组基名 / 方括号内的下标"
+                                  当作值里带基址（`ln = S_BAND[bp + X]` 是槽读取，不是地址量）。
+                                  ② 修命令行：参数缺失 / 未知选项 / 文件不存在 不再抛 Traceback（用法错误退出码 2，
+                                  读不了的文件按 X0 ERROR 报）。③ 常量折叠不再 eval（改白名单 AST 求值；原先
+                                  `X = BUF[3]` 会弹 SyntaxWarning，`2^2^2^2^2^2` 可卡死）。④ 嵌套赋值
+                                  （`a = b = 3`、`y = (z = 3) + 1`、三元分支里的赋值）里被赋值的变量不再被当作"有读点"。
+                                  ⑤ 形近判定：改为 Damerau 距离（相邻换位算 1），长度 <= 4 的名字只容 1，名字至少 3 个字符
+                                  （原先任意两个 2 字符名字互为"形近"）。⑥ 宿主变量白名单补全（spl0..N / slider1..N /
+                                  samplesblock / tempo 等）。⑦ 新增 --ignore / --ignore-file（已知发现的白名单）、
+                                  --fail-on（error|warn|note）、--self-test（内置自检）。⑧ compare 遵守 --no-note /
+                                  --json / --ignore，并额外列出"新版相对旧版新增的 check 发现"。⑨ 段落标记出现多次
+                                  按 X0 ERROR 报；文件编码 utf-8 失败时回退 gb18030。
+                                  check 的输出格式与默认退出码不变；JSON 每条发现多一个 scope 字段。
+1.0.1  2026-10-06  GLM AI(Srosx)   署名勘误：经 Coolk 确认，本脚本作者为 Hy AI（窗口3），非 Claude AI；代码零改动（仅版本号与本记录）。
+用法：
+python x176_eel_lint2.py check   项目.txt [项目2.txt ...] [选项]
+python x176_eel_lint2.py compare 旧.txt 新.txt [选项]       # 版本间 diff 视角（事故 A 方向 c）
+python x176_eel_lint2.py --self-test
+python x176_eel_lint2.py --version
+选项：
+  --addr-min N       地址类常量的下限（默认 1024）
+  --no-note          不显示 NOTE
+  --json             JSON 输出
+  --strict-b         B 类发现提升为 ERROR
+  --ignore 项[,项]   忽略已知发现，可重复。项的写法：规则:变量（B2:lb2）/ 仅规则（A2）/ 仅变量（k）/
+                     作用域::变量（s_p_tap::k）；变量处可写 * 。X0 不可忽略
+  --ignore-file 文件 每行一项，# 开头为注释
+  --fail-on 级别     达到该级别就退出码 1：error（默认）/ warn / note
+  --self-test        内置自检 16 项（1.2.0：11 + A5/C1/B3/作用域分表）
+退出码：默认有 ERROR 为 1；--fail-on 提门槛后 warn / note 也算失败；用法错误为 2
+
+针对两条 EEL_VM 硬事实：
+  事实 4 未赋值变量静默为 0 → 变量名拼错不报错、信号无声断链（事故 A）
+  事实 5 a[b] = mem[a + b] → 偏移变量自带基址时地址翻倍（事故 B / G4 型）
+
+分级：
+  ERROR 确定性事故（同一张表读写错位，必然拷贝不到值）
+  WARN  高置信疑似（孤立变量且存在形近活跃名）
+  NOTE  启发式提示，需要人看一眼（不算误报；--no-note 可关）
+
+零依赖：只用标准库，不 import x176_eel_tools，可独立运行。
+"""
+import ast
+import os
+import re
+import sys
+import warnings
+
+__version__ = '1.1.0'
+
+# ---------------------------------------------------------------- 词法 / 分段
+TOK = re.compile(r'''
+(?P<ws>\s+)
+|(?P<num>(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?)
+|(?P<id>[A-Za-z_][A-Za-z0-9_]*)
+|(?P<op>==|!=|<=|>=|&&|\|\||\+=|-=|\*=|/=|%=|[-+*/%^<>=!?:;,()\[\]&|])
+''', re.X)
+_CMT = re.compile(r'//[^\n]*|/\*.*?\*/', re.S)
+_BADCH = {'$': '不支持 $ 常量', '"': '不支持字符串', "'": '不支持字符串', '{': '不支持花括号',
+          '}': '不支持花括号', '~': '不支持 ~', '.': '不支持带点的名字',
+          '@': '代码里不允许出现 @', '#': '不支持 #', '\\': '不支持反斜杠'}
+
+
+def _blank(m):
+    return re.sub(r'[^\n]', ' ', m.group(0))
+
+
+def tokenize_pos(src, line0=1):
+    """[(kind, text, 行)]；注释按空白处理，行号不变。"""
+    src = _CMT.sub(_blank, src)
+    out, pos, line, n = [], 0, line0, len(src)
+    while pos < n:
+        m = TOK.match(src, pos)
+        if not m:
+            col = pos - (src.rfind('\n', 0, pos) + 1) + 1
+            ln = line0 + src.count('\n', 0, pos)
+            raise SyntaxError('第 %d 行第 %d 列：不支持的字符 %r（%s）；附近：%r' % (
+                ln, col, src[pos], _BADCH.get(src[pos], '见适用范围'),
+                ' '.join(src[max(0, pos - 30):pos + 30].split())))
+        k, txt = m.lastgroup, m.group(m.lastgroup)
+        pos = m.end()
+        if k == 'ws':
+            line += txt.count('\n')
+            continue
+        out.append((k, txt, line))
+    return out
+
+
+def split_sections(src):
+    n_i, n_s = src.count('@init'), src.count('@sample')
+    if n_i == 0:
+        raise SyntaxError('找不到初始化段标记')
+    if n_s == 0:
+        raise SyntaxError('找不到采样段标记')
+    if n_i > 1:
+        raise SyntaxError('初始化段标记 @init 出现 %d 次（应恰好 1 次；注释里也不要写）' % n_i)
+    if n_s > 1:
+        raise SyntaxError('采样段标记 @sample 出现 %d 次（应恰好 1 次；注释里也不要写）' % n_s)
+    i0, i1 = src.index('@init'), src.index('@sample')
+    if i1 < i0:
+        raise SyntaxError('采样段标记出现在初始化段标记之前')
+    return (src[i0 + 5:i1], src.count('\n', 0, i0 + 5) + 1,
+            src[i1 + 7:], src.count('\n', 0, i1 + 7) + 1)
+
+
+def read(path):
+    """utf-8（含 BOM）优先；失败回退 gb18030（国内编辑器常见的另存编码）。"""
+    with open(path, 'rb') as f:
+        raw = f.read()
+    for enc in ('utf-8-sig', 'gb18030'):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode('utf-8', 'replace')
+
+
+# ---------------------------------------------------------------- 作用域
+UP = re.compile(r'^[A-Z][A-Z0-9_]*$')
+ASSIGN = ('=', '+=', '-=', '*=', '/=', '%=')
+
+
+def _match_paren(toks, i):
+    d = 0
+    while i < len(toks):
+        t = toks[i][1]
+        if t == '(':
+            d += 1
+        elif t == ')':
+            d -= 1
+            if d == 0:
+                return i
+        i += 1
+    return len(toks) - 1
+
+
+class Scope:
+    __slots__ = ('kind', 'name', 'locals', 'params', 'toks', 'line')
+
+    def __init__(self, kind, name, locs, toks, line, params=frozenset()):
+        # 1.2.0（并入 Dianoia 1.1.0）：locals 仍为"形参 ∪ 声明局部"并集（gkey 沿用）；
+        # params 单独留存，供 A5 区分"调用点写"与"从未写"。
+        self.kind, self.name, self.locals, self.toks, self.line = kind, name, locs, toks, line
+        self.params = params
+
+
+def parse_scopes(src):
+    """切成 [函数作用域..., 顶层作用域]；函数体单独成域，签名与 local 表不进顶层。"""
+    i_src, l0, s_src, l1 = split_sections(src)
+    toks = tokenize_pos(i_src, l0) + tokenize_pos(s_src, l1)
+    scopes, top, i = [], [], 0
+    while i < len(toks):
+        k, t, ln = toks[i]
+        if k == 'id' and t == 'function' and i + 1 < len(toks) and toks[i + 1][0] == 'id':
+            name = toks[i + 1][1]
+            j = i + 2
+            while j < len(toks) and toks[j][1] != '(':
+                j += 1
+            pe = _match_paren(toks, j)
+            params = [x[1] for x in toks[j + 1:pe] if x[0] == 'id']
+            j = pe + 1
+            locs = []
+            if j < len(toks) and toks[j][1] == 'local':
+                j += 1
+                while j < len(toks) and toks[j][1] != '(':
+                    j += 1
+                le = _match_paren(toks, j)
+                locs = [x[1] for x in toks[j + 1:le] if x[0] == 'id']
+                j = le + 1
+            while j < len(toks) and toks[j][1] != '(':
+                j += 1
+            be = _match_paren(toks, j)
+            scopes.append(Scope('fn', name, set(params) | set(locs), toks[j + 1:be], ln,
+                                params=frozenset(params)))
+            i = be + 1
+            if i < len(toks) and toks[i][1] == ';':
+                i += 1
+            continue
+        top.append(toks[i])
+        i += 1
+    scopes.append(Scope('top', '<top>', set(), top, l0))
+    return scopes
+
+
+def gkey(sc_name, v, locs):
+    return v if v not in locs else (sc_name + '::' + v)
+
+
+# ---------------------------------------------------------------- 常量折叠
+_BIN = {ast.Add: lambda a, b: a + b, ast.Sub: lambda a, b: a - b, ast.Mult: lambda a, b: a * b,
+        ast.Div: lambda a, b: a / b, ast.Mod: lambda a, b: a % b}
+
+
+def _safe_eval(node, depth=0):
+    """只认 数字 / 一元正负 / + - * / % / ** / 整数 & |；其余（下标、调用、比较、名字）一律放弃。
+    结果量级超过 1e18、指数超过 64 也放弃（init 期的布局常量用不到）。"""
+    if depth > 60:
+        raise ValueError('太深')
+    if isinstance(node, ast.Expression):
+        return _safe_eval(node.body, depth + 1)
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, bool) or not isinstance(node.value, (int, float)):
+            raise ValueError('非数字')
+        return node.value
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        v = _safe_eval(node.operand, depth + 1)
+        return -v if isinstance(node.op, ast.USub) else v
+    if isinstance(node, ast.BinOp):
+        a, b = _safe_eval(node.left, depth + 1), _safe_eval(node.right, depth + 1)
+        op = type(node.op)
+        if op in _BIN:
+            r = _BIN[op](a, b)
+        elif op is ast.Pow:
+            if abs(b) > 64:
+                raise ValueError('指数过大')
+            r = a ** b
+        elif op in (ast.BitAnd, ast.BitOr):
+            if not (isinstance(a, int) and isinstance(b, int)):
+                raise ValueError('位运算只认整数')
+            r = (a & b) if op is ast.BitAnd else (a | b)
+        else:
+            raise ValueError('不支持的运算')
+        if isinstance(r, complex) or abs(r) > 1e18:
+            raise ValueError('结果越界')
+        return r
+    raise ValueError('不支持的节点')
+
+
+def _const_eval(py):
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            return _safe_eval(ast.parse(py, mode='eval'))
+    except (ValueError, SyntaxError, ZeroDivisionError, OverflowError, RecursionError, MemoryError):
+        return None
+
+
+def fold_constants(scopes):
+    """在顶层语句里折叠 `X = 常量表达式`（init 期的内存布局 / 字段编号 / 步长）。"""
+    val, stmts = {}, []
+    for sc in scopes:
+        if sc.kind != 'top':
+            continue
+        cur = []
+        for k, t, ln in sc.toks:
+            if t == ';':
+                if cur:
+                    stmts.append(cur)
+                cur = []
+            else:
+                cur.append((k, t, ln))
+        if cur:
+            stmts.append(cur)
+    changed, it = True, 0
+    while changed and it < 40:
+        changed, it = False, it + 1
+        for s in stmts:
+            if len(s) < 3 or s[0][0] != 'id' or s[1][1] != '=':
+                continue
+            nm = s[0][1]
+            if nm in val:
+                continue
+            expr = s[2:]
+            if any(k == 'id' and t not in val for k, t, _ in expr):
+                continue
+            py = ''.join(t if k == 'op' else (repr(val[t]) if k == 'id' else t) for k, t, _ in expr)
+            v = _const_eval(py.replace('^', '**'))
+            if v is None:
+                continue
+            val[nm] = v
+            changed = True
+    return val
+
+
+def addr_constants(val, addr_min):
+    """地址类常量：全大写且折叠值 >= addr_min（表基址；字段编号 / 步长都是小整数）。"""
+    return {k for k, v in val.items() if UP.match(k) and v >= addr_min}
+
+
+# ---------------------------------------------------------------- 收集
+def scan_arrays(scopes):
+    """扫描全部 a[b] 访问；同时记 mem 槽写入（供常量下界跨语句传播）。"""
+    arr, bases, slots = [], {}, {}
+    for sc in scopes:
+        tk = sc.toks
+        bases.setdefault(sc.name, set())
+        i = 0
+        while i < len(tk):
+            if tk[i][0] == 'op' and tk[i][1] == '[':
+                b = tk[i - 1] if i > 0 else None
+                j, d, off = i + 1, 1, []
+                while j < len(tk) and d > 0:
+                    tt = tk[j][1]
+                    if tt == '[':
+                        d += 1
+                    elif tt == ']':
+                        d -= 1
+                        if d == 0:
+                            break
+                    off.append(tk[j])
+                    j += 1
+                base = b[1] if (b and b[0] == 'id') else '?'
+                if b and b[0] == 'id':
+                    bases[sc.name].add(base)
+                arr.append((base, off, (b[2] if b else tk[i][2]), sc.name))
+                nxt = tk[j + 1][1] if j + 1 < len(tk) else ''
+                if nxt in ASSIGN:                       # X[idx] = RHS → 槽写入
+                    m, dep, rhs = j + 2, 0, []
+                    while m < len(tk):
+                        tt = tk[m][1]
+                        if tt in ('(', '['):
+                            dep += 1
+                        elif tt in (')', ']'):
+                            if dep == 0:
+                                break
+                            dep -= 1
+                        elif tt in (';', ',') and dep == 0:
+                            break
+                        rhs.append(tk[m])
+                        m += 1
+                    slots.setdefault((base, ' '.join(x[1] for x in off if x[0] != 'op'
+                                                     or x[1] in ('(', ')')), sc.name),
+                                     []).append((rhs, sc.name))
+                i = j + 1
+                continue
+            i += 1
+    return arr, bases, slots
+
+
+def _scan_rhs(tk, j, sc, lhs, key, wr, rd, selfrd, defs, slotrd):
+    """RHS 扫描：到语句边界（; / 顶层 , 或括号收拢）为止，返回边界下标（边界 token 留给调用方）。
+    1.2.0（并入 Dianoia 1.1.0）：嵌套块里的赋值按写处理并递归消费其 RHS——三元分支、括号块、
+    loop 体是合法改写形式（公告 2026-10-04 事实 2），此前记成裸读，A1/A2 漏报、defs 缺定义。"""
+    dep, bucket = 0, []
+    while j < len(tk):
+        tt = tk[j][1]
+        if tt in ('(', '['):
+            dep += 1
+        elif tt in (')', ']'):
+            if dep == 0:
+                break
+            dep -= 1
+        elif tt in (';', ',') and dep == 0:
+            break
+        k2, t2, ln2 = tk[j]
+        if k2 == 'id':
+            nxt = tk[j + 1][1] if j + 1 < len(tk) else ''
+            if nxt in ASSIGN:                       # 嵌套赋值：整块按写处理并递归消费其 RHS
+                k3 = gkey(sc.name, t2, sc.locals)
+                wr.setdefault(k3, []).append(ln2)
+                if nxt != '=':
+                    selfrd.setdefault(k3, []).append(ln2)
+                end = _scan_rhs(tk, j + 2, sc, t2, k3, wr, rd, selfrd, defs, slotrd)
+                defs.setdefault(k3, []).append((tk[j + 2:end], sc.name))
+                j = end
+                continue
+            if nxt not in ('[', '('):
+                if t2 == lhs:
+                    selfrd.setdefault(key, []).append(ln2)
+                else:
+                    rd.setdefault(gkey(sc.name, t2, sc.locals), []).append(ln2)
+        bucket.append(tk[j])
+        j += 1
+    # Y = g[idx] —— 整个 RHS 就是一次槽读，记下槽来源（嵌套块内同款）
+    if len(bucket) > 2 and bucket[0][0] == 'id' and bucket[1][1] == '[':
+        base, e, d2, idx = bucket[0][1], 2, 1, []
+        while e < len(bucket) and d2 > 0:
+            if bucket[e][1] == '[':
+                d2 += 1
+            elif bucket[e][1] == ']':
+                d2 -= 1
+                if d2 == 0:
+                    break
+            idx.append(bucket[e][1])
+            e += 1
+        slotrd.setdefault(key, set()).add((base, ' '.join(idx)))
+    return j
+
+
+def collect_rw(scopes):
+    """赋值 / 读点 / 自引用 / 槽读取。
+    1.2.0（并入 Dianoia 1.1.0）：赋值识别不再限于语句头——id+ASSIGN 一律按写（含三元分支 /
+    括号块 / loop 体内的独立赋值），嵌套 RHS 递归消费；形参仍由调用点写。"""
+    defs, rd, wr, selfrd, slotrd = {}, {}, {}, {}, {}
+    for sc in scopes:
+        tk = sc.toks
+        i = 0
+        while i < len(tk):
+            k, t, ln = tk[i]
+            if k == 'id' and i + 1 < len(tk) and tk[i + 1][0] == 'op' and tk[i + 1][1] in ASSIGN:
+                op = tk[i + 1][1]
+                lhs = t
+                key = gkey(sc.name, lhs, sc.locals)
+                wr.setdefault(key, []).append(ln)
+                if op != '=':
+                    selfrd.setdefault(key, []).append(ln)      # += 等隐含读自身
+                end = _scan_rhs(tk, i + 2, sc, lhs, key, wr, rd, selfrd, defs, slotrd)
+                defs.setdefault(key, []).append((tk[i + 2:end], sc.name))
+                i = end
+                continue
+            if k == 'id':
+                nxt = tk[i + 1][1] if i + 1 < len(tk) else ''
+                if nxt not in ('[', '(') and nxt not in ASSIGN:
+                    rd.setdefault(gkey(sc.name, t, sc.locals), []).append(ln)
+            i += 1
+    return dict(defs=defs, rd=rd, wr=wr, selfrd=selfrd, slotrd=slotrd)
+
+
+def _split_plus(toks):
+    segs, cur, d = [], [], 0
+    for t in toks:
+        if t[1] in ('(', '['):
+            d += 1
+        elif t[1] in (')', ']'):
+            d -= 1
+        if t[1] == '+' and d == 0:
+            segs.append(cur)
+            cur = []
+        else:
+            cur.append(t)
+    segs.append(cur)
+    return segs
+
+
+def _seg_floor(seg, ctx, val, cfloor):
+    """一段（只含 * 与括号）的常量下界；有减 / 除 / 比较 / 未知量时返回 None。"""
+    if any(t[1] in ('-', '/', '%', '^', '?', ':', '<', '>', '==', '!=', '&&', '||') for t in seg):
+        return None
+    prod = 1.0
+    for t in seg:
+        k, txt = t[0], t[1]
+        if k == 'num':
+            try:
+                prod *= float(txt)
+            except ValueError:
+                return None
+        elif k == 'id':
+            if txt in val:
+                prod *= val[txt]
+            elif ctx and (ctx + '::' + txt) in cfloor:
+                prod *= cfloor[ctx + '::' + txt]
+            elif txt in cfloor:
+                prod *= cfloor[txt]
+            else:
+                return None
+        elif txt in ('*', '(', ')'):
+            continue
+        else:
+            return None
+    return prod
+
+
+def expr_floor(toks, ctx, val, cfloor):
+    """表达式的常量下界：各加法段下界之和（未知段按 0 计，保守）。"""
+    tot = 0.0
+    for seg in _split_plus(toks):
+        v = _seg_floor(seg, ctx, val, cfloor)
+        if v is not None and v > 0:
+            tot += v
+    return tot
+
+
+def compute_floors(info, val, rounds=3):
+    """变量 → 常量下界（最坏情况）。只沿"定义"传播；跨 mem 槽不传数值。"""
+    cfloor = dict(val)
+    defs = info['defs']
+    for _ in range(rounds):
+        changed = False
+        for key, rhss in defs.items():
+            cand = [expr_floor(r, ctx, val, cfloor) for r, ctx in rhss]
+            m = max(cand) if cand else 0.0
+            if key not in cfloor or m > cfloor[key]:
+                cfloor[key] = m
+                changed = True
+        if not changed:
+            break
+    return cfloor
+
+
+def _value_addr_ids(rhs, ADDR):
+    """RHS 的"值"里直接带的地址常量：数组基名（后跟 [）和方括号里的下标只决定读哪一格，
+    不进入值本身，所以不算（`ln = S_BAND[bp + X]` 是槽读取，不是地址量）。"""
+    d, out = 0, []
+    for i, t in enumerate(rhs):
+        if t[1] == '[':
+            d += 1
+        elif t[1] == ']':
+            d -= 1
+        elif d == 0 and t[0] == 'id' and t[1] in ADDR:
+            nxt = rhs[i + 1][1] if i + 1 < len(rhs) else ''
+            if nxt != '[':
+                out.append(t[1])
+    return out
+
+
+def classify_vars(info, ADDR, scopes):
+    """变量按"偏移里会不会带基址"分三类：
+      carry  定义 RHS 的值里直接出现地址常量（如 tbs = S_TAP + ...）→ 确定带基址
+      slot   定义来自 mem 槽读取（如 tb = st[S_ST_A1]）        → 静态无法确定
+      scalar 其余（循环计数、常量、算术）                       → 确定不带基址
+    """
+    carry, slotv = set(), set()
+    for key, rhss in info['defs'].items():
+        if rhss and all(_value_addr_ids(r, ADDR) for r, ctx in rhss):
+            carry.add(key)
+    for key, _ in info['slotrd'].items():
+        slotv.add(key)
+    return carry, slotv
+
+
+def collect(scopes):
+    arr, bases, slots = scan_arrays(scopes)
+    d = collect_rw(scopes)
+    d['arr'], d['bases'], d['slots'] = arr, bases, slots
+    return d
+
+
+# ---------------------------------------------------------------- 规则 A：静默 0 / 孤立变量
+BUILTIN11 = {'abs', 'cos', 'exp', 'floor', 'loop', 'max', 'min', 'pow', 'sqrt', 'sin', 'tan'}
+HOST = {'spl0', 'spl1', 'srate', 'spl2', 'spl3', 'samplesblock', 'tempo', 'play_state',
+        'play_position', 'beat_position', 'ts_num', 'ts_denom', 'num_ch', 'nch', 'trigger'}
+_HOST_RE = re.compile(r'^(spl\d+|slider\d+|pdc_\w+|ext_\w+|gfx_\w+|mouse_\w+)$')
+
+
+def is_host(name):
+    return name in HOST or bool(_HOST_RE.match(name))
+
+
+def edit_distance(a, b, cap=3):
+    """Damerau（相邻换位算 1）；长度差超过 cap 直接返回 cap+1。"""
+    if abs(len(a) - len(b)) > cap:
+        return cap + 1
+    d = [list(range(len(b) + 1))]
+    for i, ca in enumerate(a, 1):
+        row = [i]
+        for j, cb in enumerate(b, 1):
+            v = min(d[i - 1][j] + 1, row[j - 1] + 1, d[i - 1][j - 1] + (ca != cb))
+            if i > 1 and j > 1 and ca == b[j - 2] and a[i - 2] == cb:
+                v = min(v, d[i - 2][j - 2] + 1)
+            row.append(v)
+        d.append(row)
+    return d[-1][-1]
+
+
+levenshtein = edit_distance      # 旧名保留，供外部脚本沿用
+
+
+def is_near(a, b):
+    """拼写形近：两边都至少 3 个字符；较短的名字 <= 4 个字符只容 1 处差异，否则容 2 处。"""
+    if a == b:
+        return False
+    m = min(len(a), len(b))
+    if m < 3:
+        return False
+    return edit_distance(a, b, 2) <= (1 if m <= 4 else 2)
+
+
+def _near_sorted(name, pool):
+    cand = [x for x in pool if is_near(name, x)]
+    return sorted(cand, key=lambda x: (edit_distance(name, x), x))
+
+
+def rule_A(info, scopes, sliders):
+    """孤立变量：有写，但没有任何"非自身赋值语句"的读点。
+    白名单：宿主变量 / desc 滑块 / 函数名 / 作过基址的符号 / 全大写常量（布局预留）。
+    定级：存在形近活跃名（见 is_near）→ WARN（疑似拼错）；
+          否则是没人读的死写 / 残留计数器 → NOTE。"""
+    out = []
+    fnames = {sc.name for sc in scopes if sc.kind == 'fn'}
+    used_as_base = set()
+    for sc in scopes:
+        used_as_base |= info['bases'].get(sc.name, set())
+    pool = set(info['wr']) | set(info['rd'])
+    active = {v for v in pool if info['rd'].get(v) and v.split('::')[-1] not in used_as_base}
+    active_names = sorted({v.split('::')[-1] for v in active if len(v.split('::')[-1]) >= 2})
+    for v in sorted(pool):
+        if not info['wr'].get(v) or info['rd'].get(v):
+            continue                                   # 没写过 / 有外部读 → 正常
+        base = v.split('::')[-1]
+        if (is_host(base) or is_host(v) or base in sliders or base in fnames
+                or base in used_as_base):
+            continue
+        if UP.match(base):
+            continue                                   # 全大写：布局 / 配置常量，写了没人读合法
+        near = _near_sorted(base, active_names)
+        sr = info['selfrd'].get(v, [])
+        ln = info['wr'][v][0]
+        scope = v.split('::')[0] if '::' in v else ''
+        where = '（作用域 %s）' % scope if scope else ''
+        tip = ('；形近且正在使用的名字：' + ' / '.join(near[:4]) + '，请核对是否拼错') if near else ''
+        if sr:
+            msg = ('孤立累加器 %s：只出现在自己的 %d 处自增 / 自引用里，没有任何其他语句读它'
+                   '（EEL2 未赋值变量静默为 0 → 拼错即无声断链）' % (base, len(sr)))
+            rule = 'A2'
+        else:
+            msg = ('孤立写入 %s：%d 处赋值，全文件没有任何语句读它（值永远出不去，等同静默 0）'
+                   % (base, len(info['wr'][v])))
+            rule = 'A1'
+        out.append({'level': 'WARN' if near else 'NOTE', 'line': ln, 'var': base, 'scope': scope,
+                    'msg': msg + tip + where, 'rule': rule, 'near': near[:4]})
+    return out
+
+
+def rule_A_diff(old, new):
+    """方向 c（补丁审查视角）：
+      A4 旧版写过、新版不再写但仍被读的变量 → 改名时漏改写点，该处静默为 0（强提示）
+      A3 新版新增的孤立变量，与旧版某个名字相近 → 疑似改名残留"""
+    out = []
+    old_names = {v.split('::')[-1] for v in old['written']}
+    new_written = {v.split('::')[-1] for v in new['written']}
+    rd = new['info']['rd']
+    new_read = {v.split('::')[-1] for v in rd}
+    old_iso = {f['var'] for f in old['findings']}
+    for v in sorted((old_names & new_read) - new_written):
+        if is_host(v) or UP.match(v):
+            continue
+        lines = sorted(ln for key, ls in rd.items() if key.split('::')[-1] == v for ln in ls)
+        out.append({'level': 'WARN', 'line': lines[0] if lines else 0, 'var': v, 'scope': '',
+                    'rule': 'A4',
+                    'msg': '旧版写过 %s，新版不再写它但仍在第 %s 行读它 → 该处恒为 0'
+                           '（EEL2 未赋值变量静默为 0；典型是改名时漏改了某个写点）'
+                           % (v, '/'.join(map(str, lines[:3]))), 'near': []})
+    for f in new['findings']:
+        if f['rule'] not in ('A1', 'A2'):
+            continue
+        v = f['var']
+        if v in old_iso:
+            continue
+        near = _near_sorted(v, sorted(old_names))
+        gone = [x for x in near if x not in new_written]
+        if gone:
+            out.append({'level': 'WARN', 'line': f['line'], 'var': v, 'scope': f.get('scope', ''),
+                        'rule': 'A3',
+                        'msg': '新版新增孤立变量 %s：旧版有相近名 %s，且它们在新版已不再被写'
+                               '（疑似改名时漏改某个写点 → 该处静默为 0）'
+                               % (v, ' / '.join(gone[:4])), 'near': gone[:4]})
+        elif near:
+            out.append({'level': 'NOTE', 'line': f['line'], 'var': v, 'scope': f.get('scope', ''),
+                        'rule': 'A3',
+                        'msg': '新版新增孤立变量 %s：旧版有相近名 %s（供人工核对）'
+                               % (v, ' / '.join(near[:4])), 'near': near[:4]})
+    return out
+
+
+# ---------------------------------------------------------------- 规则 B：双重基址
+def rule_A5(info, scopes, sliders):
+    """读侧静默 0（1.2.0 并入 Dianoia 1.1.0，补"单文件模式无读未写规则"）：
+    声明的 local 全文件从未被写、却被读 → 该处恒为 0（事故 A 方向 a：读点拼错 / 写点用了别的名字）。
+    形参由调用点写，不查。全局名只在存在形近活跃名时报（可能是宿主侧供给，宁漏勿错）。
+    定级：存在形近活跃名（Damerau 距离 <= 2、长度 >= 3）→ WARN（疑似拼错）；否则 NOTE 供人工核对。"""
+    out = []
+    fnames = {sc.name for sc in scopes if sc.kind == 'fn'}
+    used_as_base = set()
+    for sc in scopes:
+        used_as_base |= info['bases'].get(sc.name, set())
+    scmap = {sc.name: sc for sc in scopes}
+    written_names = {v.split('::')[-1] for v in info['wr']}
+    pool = set(info['rd']) | set(info['wr'])
+    active_names = sorted({v.split('::')[-1] for v in pool
+                           if len(v.split('::')[-1]) >= 2 and v.split('::')[-1] not in used_as_base})
+    for v in sorted(set(info['rd']) - set(info['wr'])):
+        base = v.split('::')[-1]
+        if base in HOST or v in HOST or base in sliders or base in fnames or base in used_as_base:
+            continue
+        if UP.match(base):
+            continue                                   # 全大写：布局常量另有 B3 管，这里不重复
+        near = sorted({x for x in active_names
+                       if x != base and len(base) >= 3 and edit_distance(base, x, 2) <= 2},
+                      key=lambda x: (edit_distance(base, x), x))
+        lns = sorted(info['rd'][v])
+        if '::' in v:
+            sc_name = v.split('::')[0]
+            sc = scmap.get(sc_name)
+            if sc is None or base not in (set(sc.locals) - set(sc.params)):
+                continue                               # 形参（或键解析不到）：调用点写，不算
+            msg = ('局部量 %s 声明了却从未赋值、却在第 %s 行被读（该处恒为 0：EEL2 未赋值变量'
+                   '静默为 0；典型是读点拼错，或写点用了别的名字）'
+                   % (base, '/'.join(map(str, lns[:3]))))
+            level = 'WARN' if near else 'NOTE'
+            if near:
+                msg += '；形近且在用的名字：%s，请核对是否拼错' % ' / '.join(near[:4])
+            msg += '（作用域 %s）' % sc_name
+            out.append({'level': level, 'line': lns[0], 'var': base, 'rule': 'A5',
+                        'msg': msg, 'near': near[:4]})
+        elif near:
+            out.append({'level': 'WARN', 'line': lns[0], 'var': base, 'rule': 'A5',
+                        'msg': '全局名 %s 从未被写、却在第 %s 行被读（该处恒为 0）；形近且在用的'
+                               '名字：%s，请核对是否拼错'
+                               % (base, '/'.join(map(str, lns[:3])), ' / '.join(near[:4])),
+                        'near': near[:4]})
+    return out
+
+
+def rule_C1(scopes):
+    """未注册内建 / 未定义函数（1.2.0 并入 Dianoia 1.1.0）：宿主遇到未注册内建会判整个文件损坏（硬事实）。
+    与 eel_tools 编译期检查互为独立第二意见（本件零依赖，可单独跑）。
+    只查名字存在性，不查定义顺序（先定义后用归 eel_tools lint）。"""
+    out = []
+    fnames = {sc.name for sc in scopes if sc.kind == 'fn'}
+    for sc in scopes:
+        tk = sc.toks
+        for i in range(len(tk) - 1):
+            if tk[i][0] == 'id' and tk[i + 1][1] == '(':
+                nm = tk[i][1]
+                if nm in BUILTIN11 or nm in fnames or nm in ('local', 'function'):
+                    continue
+                out.append({'level': 'ERROR', 'line': tk[i][2], 'var': nm, 'rule': 'C1',
+                            'near': [],
+                            'msg': '调用 %s()：既不是本文件 function 定义的函数，也不在允许的 '
+                                   '11 个内建（abs cos exp floor loop max min pow sqrt sin tan）里'
+                                   '——宿主遇到未注册内建会判整个文件损坏' % nm})
+    return out
+
+
+def rule_B3(info, val, sliders):
+    """从未赋值的大写地址名（1.2.0 并入 Dianoia 1.1.0）。一个全大写名字被当地址用
+    （基址位或偏移位）、却全文件没有任何赋值 → 大概率拼错：该次访问落在 mem 未登记区
+    （读侧恒 0）。判据是"从未赋值"而非"不在顶层"，运行期大写全局（如母版 1206 行的
+    DUAL_COUNT 族）不会误伤。"""
+    out = []
+    wr_names = {v.split('::')[-1] for v in info['wr']}
+    seen = {}
+    for base, off, ln, scname in info['arr']:
+        cands = [base] + [t[1] for t in off if t[0] == 'id']
+        for c in cands:
+            if UP.match(c) and c not in wr_names and c not in HOST and c not in sliders:
+                seen.setdefault(c, []).append((ln, scname))
+    for c in sorted(seen):
+        lns = sorted(ln for ln, _ in seen[c])
+        sns = sorted({s for _, s in seen[c]})
+        out.append({'level': 'WARN', 'line': lns[0], 'var': c, 'rule': 'B3', 'near': [],
+                    'msg': '全大写名字 %s 被当地址使用（首现第 %d 行，作用域 %s）却全文件从未赋值'
+                           '——项目纪律：大写名要么顶层 `S_X = 常量` 登记为基址，要么函数体内赋值'
+                           '为运行期计数。若非有意，疑似拼错：该次访问落在 mem 未登记区（读侧恒 0）'
+                           % (c, lns[0], ' / '.join(sns[:3]))})
+    return out
+
+
+def rule_B(info, scopes, ADDR, val, cfloor, carry, slotv, strict=False):
+    """同一张表的偏移是否混进了基址。
+      含地址（偏移变量的定义里带地址常量）与纯标量（循环计数 / 常量）并存
+        → ERROR：读写落点确定不同，拷进去的值永远是 0（G4 型静默错值）
+      只有"含地址"（其余是无法判定的槽读取）
+        → NOTE：读写自洽，但地址量级翻倍，落在池外
+    """
+    out = []
+    scmap = {sc.name: sc for sc in scopes}
+    bytab = {}
+    for base, off, ln, scname in info['arr']:
+        # 1.2.0（并入 Dianoia 1.1.0）：局部 / 形参基址按作用域分表（同名 local 在不同函数里是
+        # 不同的表，实测 st 跨 46 函数、p 跨 25 函数同名）；全局基址（S_*、mem、gmem）仍跨函数合并。
+        g = gkey(scname, base, scmap[scname].locals) if scname in scmap else base
+        bytab.setdefault(g, []).append((off, ln, scname))
+    addrs = sorted((v, k) for k, v in val.items() if k in ADDR)
+    top = addrs[-1][0] if addrs else 0
+
+    def kind_of(off, scname):
+        has_addr, unk, who = False, False, []
+        for t in off:
+            if t[0] != 'id':
+                continue
+            nm = t[1]
+            if nm in ADDR:
+                has_addr = True
+                who.append(nm)
+            elif (scname + '::' + nm) in carry or nm in carry:
+                has_addr = True
+                who.append(nm)
+            elif (scname + '::' + nm) in slotv or nm in slotv:
+                unk = True
+        return ('addr' if has_addr else ('unk' if unk else 'scalar')), who
+
+    for g, items in sorted(bytab.items()):
+        base = g.split('::')[-1]                       # 展示名（全局键无前缀，原样）
+        kinds = {}
+        for off, ln, scname in items:
+            k, who = kind_of(off, scname)
+            kinds.setdefault(k, []).append((ln, who, off, scname))
+        na = len(kinds.get('addr', []))
+        ns = len(kinds.get('scalar', []))
+        nu = len(kinds.get('unk', []))
+        if na and ns:
+            a0 = kinds['addr'][0]
+            s0 = kinds['scalar'][0]
+            who = sorted({w for _, ws, _, _ in kinds['addr'] for w in ws})
+            extra = ''
+            if base in val:
+                f0 = expr_floor(a0[2], a0[3], val, cfloor)
+                extra = '（该行偏移常量下界 %d，base=%d，落点约 %d）' % (
+                    int(f0), int(val[base]), int(val[base] + f0))
+            out.append({'level': 'ERROR' if strict else 'NOTE', 'line': a0[0],
+                        'var': base, 'scope': '', 'rule': 'B1',
+                        'msg': '同一张表 %s 的偏移写法不一致：第 %d 行偏移含基址量级（%s）%s，'
+                               '第 %d 行却是纯索引（循环计数 / 常量）。a[b] 是 mem[a+b]：'
+                               '两边落点不同 → 写入落在登记区外、读取仍在原处，拷进去的值永远是 0'
+                               '（G4 型静默错值）。本表 %d 处含基址 / %d 处纯索引 / %d 处无法判定。'
+                               % (base, a0[0], '/'.join(who[:3]), extra, s0[0], na, ns, nu)})
+        elif na and not ns:
+            a0 = kinds['addr'][0]
+            who = sorted({w for _, ws, _, _ in kinds['addr'] for w in ws})
+            extra = ''
+            if base in val:
+                f0 = expr_floor(a0[2], a0[3], val, cfloor)
+                extra = ('base=%d，该行偏移常量下界 %d，落点约 %d；池顶约 %d。'
+                         % (int(val[base]), int(f0), int(val[base] + f0), int(top)))
+            out.append({'level': 'NOTE', 'line': a0[0], 'var': base, 'scope': '', 'rule': 'B2',
+                        'msg': '表 %s 的 %d 处访问偏移都含基址量级（%s），其余 %d 处是从 mem 槽读出、'
+                               '静态无法确定。若读写用的是同一个偏移变量，则读写自洽、不会静默归零，'
+                               '但地址量级翻倍：%s占用池外区域时，宿主内存不足或该区被别的用途占用会出错。'
+                               '若非有意，把偏移变量里的基址去掉即可（读写同时改，输出逐位不变）。'
+                               % (base, na, '/'.join(who[:3]), nu, extra)})
+    return out
+
+
+# ---------------------------------------------------------------- 忽略清单
+_RULE_ID = re.compile(r'^[A-Z]\d+$')
+
+
+def parse_ignores(items):
+    """['A2:k', 'B2', 'k', 's_p_tap::k'] → [(规则|None, 变量|None)]"""
+    out = []
+    for raw in items:
+        for it in raw.split(','):
+            it = it.strip()
+            if not it:
+                continue
+            m = re.match(r'^([A-Z]\d+):(.+)$', it)
+            if m:
+                out.append((m.group(1), m.group(2)))
+            elif _RULE_ID.match(it):
+                out.append((it, None))
+            else:
+                out.append((None, it))
+    return out
+
+
+def load_ignore_file(path):
+    items = []
+    for line in read(path).splitlines():
+        line = line.split('#', 1)[0].strip()
+        if line:
+            items.append(line)
+    return items
+
+
+def is_ignored(f, ign):
+    if f['rule'] == 'X0':
+        return False
+    full = (f.get('scope') + '::' + f['var']) if f.get('scope') else f['var']
+    for r, v in ign:
+        if r is not None and r != f['rule']:
+            continue
+        if v is None or v == '*' or v == f['var'] or v == full:
+            return True
+    return False
+
+
+# ---------------------------------------------------------------- 主流程
+def sliders_of(src):
+    """desc 段滑块变量（JSFX slider / JamesDSP 两种写法），宿主写入、脚本只读，不算孤立。"""
+    out = set()
+    head = src.split('@init')[0]
+    for m in re.finditer(r'^\s*slider\d*\s*:\s*([A-Za-z_]\w*)', head, re.M):
+        out.add(m.group(1))
+    for m in re.finditer(r'^\s*([A-Za-z_]\w*)\s*=\s*[-\d.]+\s*<', head, re.M):
+        out.add(m.group(1))
+    return out
+
+
+def analyze_src(src, addr_min=1024, strict_b=False):
+    scopes = parse_scopes(src)
+    val = fold_constants(scopes)
+    ADDR = addr_constants(val, addr_min)
+    info = collect(scopes)
+    cfloor = compute_floors(info, val)
+    carry, slotv = classify_vars(info, ADDR, scopes)
+    sliders = sliders_of(src)
+    fa = rule_A(info, scopes, sliders)
+    fb = rule_B(info, scopes, ADDR, val, cfloor, carry, slotv, strict_b)
+    fc = rule_A5(info, scopes, sliders) + rule_C1(scopes) + rule_B3(info, val, sliders)
+    return {'scopes': scopes, 'val': val, 'ADDR': ADDR, 'info': info, 'cfloor': cfloor,
+            'findings': fa + fb + fc, 'written': set(info['wr']),
+            'names': {v.split('::')[-1] for v in set(info['wr']) | set(info['rd'])}}
+
+
+def _x0(msg):
+    return [{'level': 'ERROR', 'line': 0, 'var': '', 'scope': '', 'rule': 'X0',
+             'msg': msg, 'near': []}]
+
+
+def _analyze_file(p, addr_min, strict_b):
+    """(分析结果 | None, 发现列表)；读不了 / 解析不了按 X0 ERROR 报。"""
+    try:
+        r = analyze_src(read(p), addr_min, strict_b)
+        return r, r['findings']
+    except SyntaxError as e:
+        return None, _x0('无法解析：%s' % e)
+    except OSError as e:
+        return None, _x0('无法读取文件：%s' % (e.strerror or e))
+
+
+_RANK = {'NOTE': 1, 'WARN': 2, 'ERROR': 3}
+_FAIL = {'error': 3, 'warn': 2, 'note': 1}
+
+
+def _filter(fs, show_note, ign):
+    kept, supp = [], 0
+    for f in fs:
+        if is_ignored(f, ign):
+            supp += 1
+        elif show_note or f['level'] != 'NOTE':
+            kept.append(f)
+    return kept, supp
+
+
+def _sorted(fs):
+    return sorted(fs, key=lambda x: (x['level'] != 'ERROR', x['level'] != 'WARN', x['line']))
+
+
+def _count_fail(fs, fail_on):
+    return sum(1 for f in fs if _RANK[f['level']] >= _FAIL[fail_on])
+
+
+def run_check(paths, addr_min=1024, show_note=True, as_json=False, strict_b=False,
+              ignore=(), fail_on='error'):
+    ign = parse_ignores(ignore)
+    allf = []
+    for p in paths:
+        _, fs = _analyze_file(p, addr_min, strict_b)
+        fs, supp = _filter(fs, show_note, ign)
+        allf.append((p, fs, supp))
+    if as_json:
+        import json
+        rows = []
+        for p, fs, supp in allf:
+            row = {'file': p, 'findings': fs}
+            if supp:
+                row['suppressed'] = supp
+            rows.append(row)
+        print(json.dumps(rows, ensure_ascii=False, indent=1))
+    else:
+        for p, fs, supp in allf:
+            ne = sum(1 for f in fs if f['level'] == 'ERROR')
+            nw = sum(1 for f in fs if f['level'] == 'WARN')
+            nn = sum(1 for f in fs if f['level'] == 'NOTE')
+            print('== %s : %d ERROR / %d WARN / %d NOTE%s' % (
+                p, ne, nw, nn, (' / %d 已忽略' % supp) if supp else ''))
+            for f in _sorted(fs):
+                print('  [%-5s] %s%s （规则 %s）' % (
+                    f['level'], ('第 %d 行：' % f['line']) if f['line'] else '', f['msg'], f['rule']))
+    return sum(_count_fail(fs, fail_on) for _, fs, _ in allf)
+
+
+def _fp(f):
+    return (f['rule'], f['var'], f.get('scope', ''))
+
+
+def run_compare(old_p, new_p, addr_min=1024, show_note=True, as_json=False, strict_b=False,
+                ignore=(), fail_on='error'):
+    ign = parse_ignores(ignore)
+    o, ofs = _analyze_file(old_p, addr_min, strict_b)
+    n, nfs = _analyze_file(new_p, addr_min, strict_b)
+    if o is None or n is None:
+        extra = []
+        if o is None:
+            extra += [dict(f, msg='旧版 ' + f['msg']) for f in ofs]
+        if n is None:
+            extra += [dict(f, msg='新版 ' + f['msg']) for f in nfs]
+        newonly = []
+    else:
+        extra = rule_A_diff(o, n)
+        covered = {f['var'] for f in extra if f['rule'] == 'A3'}
+        seen = {_fp(f) for f in ofs}
+        newonly = [dict(f, new=True) for f in nfs
+                   if _fp(f) not in seen and not (f['rule'] in ('A1', 'A2') and f['var'] in covered)]
+    allf, supp = _filter(extra + newonly, show_note, ign)
+    if as_json:
+        import json
+        print(json.dumps({'old': old_p, 'new': new_p, 'findings': allf, 'suppressed': supp},
+                         ensure_ascii=False, indent=1))
+    else:
+        print('== compare %s → %s' % (old_p, new_p))
+        if not allf:
+            print('  未发现"新版新增孤立变量 + 旧版相近名"的形态，也没有新版新增的 check 发现'
+                  + ((' （%d 条已忽略）' % supp) if supp else ''))
+        for f in sorted(allf, key=lambda x: (x['level'] != 'ERROR', x['level'] != 'WARN', x['line'])):
+            print('  [%-5s] %s%s （规则 %s%s）' % (
+                f['level'], ('第 %d 行：' % f['line']) if f['line'] else '', f['msg'], f['rule'],
+                '，新版新增' if f.get('new') else ''))
+        if allf and supp:
+            print('  （另有 %d 条已忽略）' % supp)
+    return _count_fail(allf, fail_on)
+
+
+# ---------------------------------------------------------------- 自检
+_HDR = 'desc:t\n@init\n'
+_T_TYPO = _HDR + 'cutoff = 0.5; cuttof = 0.7;\n@sample\nspl0 = cutoff * spl0;\n'
+_T_COUNTER = _HDR + 'i = 0;\n@sample\nloop(8, i += 1; );\nspl0 = spl0;\n'
+_T_NEST = _HDR + 'a = b = 3;\n@sample\nspl0 = spl0 * a;\n'
+_T_SWAP = _HDR + 'gain = 1; gian = 2;\n@sample\nspl0 = spl0 * gain;\n'
+_T_G4 = (_HDR + 'BUF = 4096; BUF2 = BUF + 2048; ptr = BUF2;\n@sample\n'
+         'BUF[ptr + 1] = 1; q = BUF[3]; spl0 = q;\n')
+_T_SLOT = (_HDR + 'S_BAND = 8192; S_BUF = 16384;\nfunction f(bp) local(lb2, ln, w) (\n'
+           '  lb2 = S_BUF + S_BAND[bp]; ln = S_BAND[bp + 1]; w = S_BAND[bp + 2];\n'
+           '  lb2[w] = 1; lb2[w + ln] = 2;\n);\n@sample\nf(0); spl0 = spl0;\n')
+_T_FOLD = _HDR + 'BUF = 4096; X = BUF[3]; Y = 2^2^2^2^2^2^2; Z = 2 * BUF;\n@sample\nspl0 = Z;\n'
+_T_DUP = 'desc:t\n@init\n// @init again\n@sample\nspl0 = 0;\n'
+_T_A5N = _HDR + 'function f() local(depth) ( spl0 = depth; );\n@sample\nf(0);\n'
+_T_A5W = _HDR + 'gain = 0.8;\n@sample\nspl0 = gian * gain;\n'
+_T_C1 = _HDR + '@sample\nspl0 = foo(0.5);\n'
+_T_B3 = _HDR + '@sample\nspl0 = gmem[XBSE + 1.0];\n'
+_T_SCOPE = (_HDR + 'S_X = 65536.0;\n@sample\nspl0 = f1(1.0) + f2(2.0);\n'
+            'function f1(z) local(p, q) (\n  p = 100.0;\n  q = S_X + 16.0;\n'
+            '  p[q] = z;\n  p[q]\n);\n'
+            'function f2(z) local(p, j) (\n  p = 200.0;\n  j = 0.0;\n  p[j] = z;\n  p[j]\n);\n')
+_T_A_OLD = _HDR + 'x = 1; mixlevel = 2;\n@sample\nspl0 = spl0 * mixlevel + x;\n'
+_T_A_NEW = _HDR + 'x = 1; mixlevl = 2;\n@sample\nspl0 = spl0 * mixlevel + x;\n'
+
+
+def selftest():
+    def an(src, **kw):
+        return analyze_src(src, **kw)['findings']
+
+    def has(fs, rule, var=None, level=None):
+        return any(f['rule'] == rule and (var is None or f['var'] == var)
+                   and (level is None or f['level'] == level) for f in fs)
+
+    def folded():
+        v = fold_constants(parse_scopes(_T_FOLD))
+        return v.get('Z') == 8192 and 'X' not in v and 'Y' not in v
+
+    def dup_marker():
+        try:
+            parse_scopes(_T_DUP)
+        except SyntaxError:
+            return True
+        return False
+
+    def cmp_rename():
+        o, n = analyze_src(_T_A_OLD), analyze_src(_T_A_NEW)
+        d = rule_A_diff(o, n)
+        return has(d, 'A4', 'mixlevel', 'WARN') and has(d, 'A3', 'mixlevl', 'WARN')
+
+    cases = [
+        ('A1 拼错的孤立写入 → WARN 并给出形近名', lambda: has(an(_T_TYPO), 'A1', 'cuttof', 'WARN')),
+        ('A2 死计数器 → NOTE', lambda: has(an(_T_COUNTER), 'A2', 'i', 'NOTE')),
+        ('A1 嵌套赋值 a = b = 3：b 无读点 → 报', lambda: has(an(_T_NEST), 'A1', 'b')),
+        ('A1 相邻换位 gain / gian → WARN', lambda: has(an(_T_SWAP), 'A1', 'gian', 'WARN')),
+        ('B1 同表基址 / 纯索引混用 → NOTE，--strict-b → ERROR',
+         lambda: has(an(_T_G4), 'B1', 'BUF', 'NOTE') and has(an(_T_G4, strict_b=True), 'B1', 'BUF', 'ERROR')),
+        ('B2 槽读取偏移（lb2 型）不再误报', lambda: not any(f['rule'].startswith('B') for f in an(_T_SLOT))),
+        ('常量折叠：安全、不卡死、不 eval', folded),
+        ('段落标记重复 → X0', dup_marker),
+        ('compare 改名漏改 → A3 + A4', cmp_rename),
+        ('--ignore 规则:变量 生效', lambda: is_ignored({'rule': 'A2', 'var': 'i', 'scope': ''},
+                                                  parse_ignores(['A2:i'])) and not is_ignored(
+            {'rule': 'A1', 'var': 'i', 'scope': ''}, parse_ignores(['A2:i']))),
+        ('近似判定：2 字符名互不形近 / 换位算 1', lambda: not is_near('ab', 'cd') and is_near('gain', 'gian')),
+        ('A5 声明 local 未写被读（无形近）→ NOTE', lambda: has(an(_T_A5N), 'A5', 'depth', 'NOTE')),
+        ('A5 全局读侧拼错（形近在用）→ WARN', lambda: has(an(_T_A5W), 'A5', 'gian', 'WARN')),
+        ('C1 未注册内建 → ERROR', lambda: has(an(_T_C1), 'C1', 'foo', 'ERROR')),
+        ('B3 大写地址名从未赋值 → WARN', lambda: has(an(_T_B3), 'B3', 'XBSE', 'WARN')),
+        ('rule_B 作用域分表：同名 local 基址不跨函数合并（t09 假 B1 消解）',
+         lambda: not any(f['rule'] == 'B1' for f in an(_T_SCOPE))),
+    ]
+    bad = 0
+    for name, fn in cases:
+        try:
+            ok = bool(fn())
+        except Exception as e:                                  # 自检本身不许崩
+            ok, name = False, '%s（异常：%r）' % (name, e)
+        print('  [%s] %s' % ('OK  ' if ok else 'FAIL', name))
+        bad += 0 if ok else 1
+    print('selftest %d/%d' % (len(cases) - bad, len(cases)))
+    return bad
+
+
+# ---------------------------------------------------------------- 命令行
+def _usage_error(msg):
+    sys.stderr.write('x176_eel_lint2: %s\n（--help 看用法）\n' % msg)
+    return 2
+
+
+def main(argv):
+    a = argv[1:]
+    if not a or a[0] in ('-h', '--help'):
+        print(__doc__)
+        return 0
+    if a[0] == '--version':
+        print('x176_eel_lint2 %s' % __version__)
+        return 0
+    if a[0] == '--self-test':
+        return 1 if selftest() else 0
+    opt = dict(addr_min=1024.0, show_note=True, as_json=False, strict_b=False, ignore=[], fail_on='error')
+    rest, i = [], 0
+    while i < len(a):
+        x = a[i]
+        if x in ('--addr-min', '--ignore', '--ignore-file', '--fail-on'):
+            if i + 1 >= len(a):
+                return _usage_error('%s 缺少参数' % x)
+            v = a[i + 1]
+            i += 2
+            if x == '--addr-min':
+                try:
+                    opt['addr_min'] = float(v)
+                except ValueError:
+                    return _usage_error('--addr-min 需要数字，收到 %r' % v)
+            elif x == '--ignore':
+                opt['ignore'].append(v)
+            elif x == '--ignore-file':
+                try:
+                    opt['ignore'] += load_ignore_file(v)
+                except OSError as e:
+                    return _usage_error('读不了忽略清单 %s：%s' % (v, e.strerror or e))
+            else:
+                if v not in _FAIL:
+                    return _usage_error('--fail-on 只能是 error / warn / note，收到 %r' % v)
+                opt['fail_on'] = v
+            continue
+        if x == '--no-note':
+            opt['show_note'] = False
+        elif x == '--strict-b':
+            opt['strict_b'] = True
+        elif x == '--json':
+            opt['as_json'] = True
+        elif x.startswith('--'):
+            return _usage_error('未知选项 %s' % x)
+        else:
+            rest.append(x)
+        i += 1
+    if not rest or rest[0] not in ('check', 'compare'):
+        return _usage_error('第一个参数应为 check 或 compare')
+    if rest[0] == 'compare':
+        if len(rest) != 3:
+            return _usage_error('compare 需要两个文件：旧.txt 新.txt')
+        return 1 if run_compare(rest[1], rest[2], **opt) else 0
+    if len(rest) < 2:
+        return _usage_error('check 至少需要一个文件')
+    return 1 if run_check(rest[1:], **opt) else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv))
